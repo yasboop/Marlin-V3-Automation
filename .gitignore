@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# Runtime data (generated per task)
+automation/data/*.json
+automation/data/*.txt
+automation/data/*.md
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Generated (can regenerate from .md)
+Marlin_V3_Master_Guide.pdf

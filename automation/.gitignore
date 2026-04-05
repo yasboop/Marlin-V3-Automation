@@ -1,0 +1,11 @@
+# Runtime data (generated per task -- do not commit)
+data/*.json
+data/*.txt
+data/*.md
+!data/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
