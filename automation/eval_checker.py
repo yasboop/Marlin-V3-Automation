@@ -255,6 +255,16 @@ def check_structural_completeness(eval_text: str) -> list[dict]:
                     "message": "Key-axis present for non-equivalent rating",
                 })
 
+    # Check for raw axis numbers in text (signals template usage)
+    raw_axis_refs = re.findall(r'\b6\.(?:1[01]?|[2-9])\b', eval_text)
+    if raw_axis_refs:
+        results.append({
+            "check": "Raw axis number references",
+            "status": "FAIL",
+            "severity": "CRITICAL",
+            "message": f"Found raw axis numbers in text: {', '.join(set(raw_axis_refs))}. Use axis NAMES (Correctness, Code quality, Instruction adherence, etc.) instead. Raw numbers signal template usage and trigger rejection.",
+        })
+
     return results
 
 
@@ -297,6 +307,25 @@ def check_rating_consistency(eval_text: str) -> list[dict]:
                     "severity": "WARNING",
                     "message": f"Axis {num} rated {rating} but justification does not use expected language. {rating} needs words like: {', '.join(required[:3])}",
                 })
+
+    # Check for blanket identical ratings (all axes same rating = lazy evaluation)
+    if len(axes) >= 11:
+        ratings_only = [r for _, r, _ in axes]
+        unique_ratings = set(ratings_only)
+        if len(unique_ratings) == 1:
+            results.append({
+                "check": "Blanket rating detection",
+                "status": "FAIL",
+                "severity": "CRITICAL",
+                "message": f"All 11 axes rated identically ({ratings_only[0]}). This signals lazy/biased evaluation and will be rejected. Even when one trajectory clearly wins, individual axes should vary (e.g., the loser may still have good code quality or communication).",
+            })
+        elif len(unique_ratings) <= 2 and all(r in ('A1', 'A2') or r in ('B1', 'B2') for r in unique_ratings):
+            results.append({
+                "check": "Near-blanket rating detection",
+                "status": "WARN",
+                "severity": "WARNING",
+                "message": f"Only {len(unique_ratings)} distinct ratings used across 11 axes ({', '.join(unique_ratings)}). Consider whether some axes genuinely warrant different ratings for a more balanced evaluation.",
+            })
 
     # Check overall preference aligns with axis majority
     pref_content = find_section(eval_text, EXPECTED_SECTIONS["overall_preference"])

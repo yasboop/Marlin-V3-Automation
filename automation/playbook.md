@@ -39,7 +39,9 @@ These rules are extracted from all 6 documentation files. Violations of any = ta
 - Strengths must be EVALUATIVE, not descriptive. Use "because" / "which means" to explain impact.
 - N/A only for truly inapplicable axes. Overusing N/A = rejection.
 - Key-axis REQUIRED for all non-equivalent ratings (A1-A3, B1-B3).
+- Key-axis field MUST use the axis NAME (e.g. "Correctness", "Code quality"), NEVER raw numbers (e.g. "6.1", "6.2"). Raw numbers signal template usage and trigger rejection.
 - Extreme ratings (A1/B1) require strong evidence ("fails", "broken", "incorrect").
+- DO NOT use blanket extreme ratings (all 11 axes the same). If the "losing" trajectory completed partial work, some axes MUST reflect that work (use A3/B3 or A4/B4 on those axes).
 - Overall preference must be consistent with axis ratings majority.
 - Rating language: A1/B1 = "fails/broken", A2/B2 = "substantially better", A3/B3 = "better structured", A4/B4 = "minor differences only".
 
@@ -180,8 +182,24 @@ imperfections and casual phrasing differ.
 - Rate the succeeding trajectory with A1/B1 or A2/B2
 - Use language: "fails to produce any output" / "broken" for the failed one
 - Strengths of failed trajectory: "N/A -- trajectory produced no changes"
-- Key-axis: pick the most relevant axis (usually 6.1 correctness)
+- Key-axis: use the AXIS NAME (e.g. "Correctness"), never raw numbers like "6.1"
 - The winner's changes get synced to main repo for the next turn
+
+### When one trajectory completes partially (CRITICAL -- most common scenario)
+This is the case reviewers flag most often. Both trajectories produced SOME
+work but one did more. DO NOT blanket all 11 axes to one extreme rating.
+
+- Compare what EACH trajectory actually accomplished (count completed sub-tasks)
+- The winner gets favorable ratings on axes where they genuinely outperformed
+- The loser STILL gets credit on axes where they did real work
+- Example: if prompt had 5 sub-tasks, A completed all 5, B completed 3:
+  - Correctness: A2 (A did more, but B wasnt wrong on what it did)
+  - Code quality: A3 or A4 (both may have written clean code)
+  - Instruction adherence: A2 (A followed more of the prompt)
+  - Verification: could be B3 if B ran tests but A didnt
+  - Communication: A4 if both communicated clearly
+- The justification MUST acknowledge what the loser accomplished
+- NEVER rate all 11 axes identically -- this signals lazy evaluation
 
 ### When both trajectories fail
 - Rate A4/B4 ("minor differences only" -- both produced nothing)
@@ -1004,6 +1022,14 @@ tmux capture-pane -t "<session_id>-B" -p -S -500 > data/turn1_trace_B.txt
 Scan these traces for test execution, error patterns, and risky actions.
 Incorporate findings into the feedback text (Step 3).
 
+**RATING BALANCE RULE:** Before generating ratings, count how many
+sub-tasks/requirements each trajectory completed. If the "loser"
+completed ANY sub-tasks, it MUST get partial credit on relevant axes.
+Never use the same extreme rating (A1 or B1) across all 11 axes
+unless the loser literally produced ZERO output. If the loser completed
+3 out of 5 sub-tasks, axes like Code quality, Communication, and
+Question discipline should reflect partial success (A3/B3 or A4/B4).
+
 #### STEP 2: Compare A vs B (Turn 1) [AUTOMATION]
 
 Read both diff files completely. For each trajectory, evaluate:
@@ -1046,7 +1072,10 @@ in this format:
 6.11=[A1-B1]
 overall=[A1-B1]
 ::KEY_AXIS::
-[which axis mattered most and why -- 1 sentence]
+[Use the AXIS NAME, not the number. Write e.g. "Correctness --
+the winning model produced working code while the other failed to
+compile" NOT "6.1 -- ...". Reviewer must understand the axis
+without referencing a template.]
 ::JUSTIFICATION::
 [2-3 sentences comparing A vs B with evidence]
 ::ACTION::
@@ -1247,10 +1276,12 @@ Print a full summary and pre-filled Snorkel fields:
   PR URL: [full GitHub URL]
 
   CLAUDE.md source:
-    "I added/modified the claude.md file, and it can be seen
-     in the first turn's diff"
+    "I created the CLAUDE.md file and committed it to the
+     repository before starting the task. It was copied to
+     both trajectory worktree caches so both models could
+     reference it during execution."
 
-  Prompt Type: [Refactoring / Testing / etc.]
+  Prompt Type: [MUST match one of the 14 categories from Phase 2]
 
   Production ready: [No updates required / Last mile updates]
 
@@ -1264,10 +1295,16 @@ Print a full summary and pre-filled Snorkel fields:
      happened, which model managed context better, etc.]
 
 ================================================================
-  AFTER FILLING SNORKEL FORM:
-  1. Review the Diff Viewer -- click each turn to verify diffs loaded
-  2. Click Submit
-  3. WARNING: IRREVERSIBLE. Cannot edit after submission.
+  BEFORE SUBMITTING -- VERIFY THESE FIELDS ARE FILLED:
+  [ ] PR URL is pasted (full GitHub URL)
+  [ ] CLAUDE.md source is filled (use text above)
+  [ ] Prompt Type is SELECTED (dropdown -- not blank!)
+  [ ] Production ready is selected
+  [ ] Time estimates are entered
+  [ ] Task Reflection is pasted
+  [ ] Diff Viewer: click EACH turn to verify diffs loaded
+
+  WARNING: IRREVERSIBLE. Cannot edit after submission.
 ================================================================
 ```
 
@@ -1280,6 +1317,10 @@ Print a full summary and pre-filled Snorkel fields:
 5. **Evaluation claims must cite file/function evidence** -- no hand-waving
 6. **Ratings are relative** (A vs B), not absolute (vs ideal)
 7. **Justification language matches rating magnitude** -- A1 = "fails", A3 = "better structured"
+8. **NEVER use raw axis numbers (6.1, 6.2, etc.) in feedback or key-axis text** -- always use names: Correctness, Code quality, Instruction adherence, Right-sized solution, Safety judgment, Self-reporting accuracy, Professional judgment, Verification discipline, Question discipline, Senior SWE approach, Communication quality
+9. **NEVER rate all 11 axes identically** -- even when one trajectory clearly wins, differentiate per-axis based on what each model actually did. If the "loser" completed some sub-tasks, acknowledge that with moderate ratings on relevant axes
+10. **Prompt Type MUST be selected** on Snorkel -- verify before submitting
+11. **CLAUDE.md source text must accurately describe when CLAUDE.md was created** -- it was committed BEFORE Turn 1, not visible in trajectory diffs
 8. **All generated text uses WRITING STYLE RULES** -- feedback, prompts, evaluation text all follow the 11 humanizing rules automatically
 9. **If a trajectory fails or produces no diff**, note it and rate accordingly
 10. **Validation is mandatory** -- `prompt_validator.py` on every prompt, `eval_checker.py` on evaluation
@@ -1648,7 +1689,7 @@ for any text fields.
 | Field | Source |
 |-------|--------|
 | PR URL | `https://github.com/{owner}/{repo}/pull/{number}` |
-| Claude.md source | "I added/modified the claude.md file, and it can be seen in the first turn's diff" |
+| Claude.md source | "I created the CLAUDE.md file and committed it to the repository before starting the task. It was copied to both trajectory worktree caches so both models could reference it during execution." |
 | Prompt Type | Match to one of the 14 categories |
 | Production ready | "No updates required - merge as is" if final turn's winner passed tests and ruff |
 | Time to complete (min) | Estimate from task start to finish |
