@@ -11,7 +11,7 @@
 These rules are extracted from all 6 documentation files. Violations of any = task rejection.
 
 ### Prompt Rules
-- NO em-dashes (Unicode U+2014 or "--" that renders as long dash). Use hyphens or commas.
+- NO em-dashes (Unicode U+2014) and NO double-hyphens ("--") in any generated text. Use commas, periods, or single hyphens instead. Both are LLM signatures.
 - NO PR references (#number, pull/number, "this PR", branch names).
 - NO role-based prompting ("You are a senior engineer", "Act as an expert").
 - NO over-prescriptive instructions ("on line 47, change X to Y").
@@ -82,8 +82,9 @@ follow these rules to produce natural-sounding human writing:
    config (not configuration), deps (not dependencies), 
    SOTA (not state-of-the-art), dev (not development)
 
-5. DASHES OVER FORMAL CONNECTORS: Use " - " instead of semicolons
-   or "which includes" / "including" clause structures
+5. NO DOUBLE HYPHENS: Never use "--" in generated text. Use commas,
+   periods, or " - " (single hyphen with spaces) instead. Double
+   hyphens are an LLM writing signature and get flagged by reviewers
 
 6. NO TRAILING PERIODS: Drop the period from the last sentence
    of each section

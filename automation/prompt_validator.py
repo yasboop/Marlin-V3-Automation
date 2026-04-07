@@ -34,7 +34,11 @@ def check_em_dashes(text: str) -> list[str]:
 
     if "\u2013" in text:
         count = text.count("\u2013")
-        issues.append(f"En-dash character (U+2013) found {count} time(s) -- replace with regular hyphen")
+        issues.append(f"En-dash character (U+2013) found {count} time(s) - replace with regular hyphen")
+
+    double_hyphens = re.findall(r'(?<!\w)--(?!\w)', text)
+    if double_hyphens:
+        issues.append(f"Double-hyphen ('--') found {len(double_hyphens)} time(s) - this is an LLM signature. Use commas, periods, or single hyphens instead")
 
     return issues
 
