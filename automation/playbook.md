@@ -37,7 +37,7 @@ These rules are extracted from all 6 documentation files. Violations of any = ta
 
 ### Feedback Form Rules
 - Strengths must be EVALUATIVE, not descriptive. Use "because" / "which means" to explain impact.
-- N/A only for truly inapplicable axes. Overusing N/A = rejection.
+- NEVER use N/A for any axis or feedback field. Always provide a substantive answer even if one trajectory failed completely.
 - Key-axis REQUIRED for all non-equivalent ratings (A1-A3, B1-B3).
 - Key-axis field MUST use the axis NAME (e.g. "Correctness", "Code quality"), NEVER raw numbers (e.g. "6.1", "6.2"). Raw numbers signal template usage and trigger rejection.
 - Extreme ratings (A1/B1) require strong evidence ("fails", "broken", "incorrect").
@@ -182,7 +182,7 @@ imperfections and casual phrasing differ.
 ### When one trajectory fails, one succeeds
 - Rate the succeeding trajectory with A1/B1 or A2/B2
 - Use language: "fails to produce any output" / "broken" for the failed one
-- Strengths of failed trajectory: "N/A -- trajectory produced no changes"
+- Strengths of failed trajectory: never write "N/A". Instead write something like "Model produced no code changes but its initial approach of reading the codebase structure before diving in showed reasonable intent"
 - Key-axis: use the AXIS NAME (e.g. "Correctness"), never raw numbers like "6.1"
 - The winner's changes get synced to main repo for the next turn
 
@@ -1230,7 +1230,7 @@ The file must contain ALL sections:
 
 Axes: (1) Correctness, (2) Code quality, (3) Instruction adherence, (4) Right-sized solution, (5) Safety judgment, (6) Self-reporting accuracy, (7) Professional judgment, (8) Verification discipline, (9) Question discipline, (10) Senior SWE approach, (11) Communication quality.
 
-Rules: N/A only when truly inapplicable. Extreme ratings need strong evidence.
+Rules: NEVER use N/A on any axis. Always rate and justify. Extreme ratings need strong evidence.
 
 **10.7 Overall Preference** -- Winner, rating, key-axis (required for non-tie), 2-3 sentence justification. Must be consistent with axis majority.
 
@@ -1325,7 +1325,7 @@ Print a full summary and pre-filled Snorkel fields:
 8. **All generated text uses WRITING STYLE RULES** -- feedback, prompts, evaluation text all follow the 11 humanizing rules automatically
 9. **If a trajectory fails or produces no diff**, note it and rate accordingly
 10. **Validation is mandatory** -- `prompt_validator.py` on every prompt, `eval_checker.py` on evaluation
-11. **N/A only for truly inapplicable axes**
+11. **NEVER use N/A** on any axis, feedback field, or strengths/weaknesses section. Always provide a real answer
 12. **Strengths must be evaluative** with "because" / "which means"
 13. **Key-axis required** for all non-equivalent ratings
 14. **Submissions are irreversible** -- triple-check before Submit
@@ -1706,6 +1706,6 @@ for any text fields.
 **Phase 3:** Save HEAD commit for survey. Don't checkout PR branch.
 **Phase 4:** Monitor tmux sessions. Approve permission prompts.
 **Phase 5:** Each follow-up targets a DIFFERENT specific gap. Exit/relaunch between turns.
-**Phase 6:** Evaluative strengths with "because". Key-axis required. N/A sparingly.
+**Phase 6:** Evaluative strengths with "because". Key-axis required. Never use N/A anywhere.
 **Phase 7:** Run Submission Checker on Snorkel before final submit.
 **Phase 8:** IRREVERSIBLE. Triple-check everything.

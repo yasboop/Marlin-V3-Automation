@@ -364,6 +364,15 @@ def check_content_quality(eval_text: str) -> list[dict]:
     """Check strengths are evaluative, references are specific, justifications are deep."""
     results = []
 
+    na_matches = re.findall(r'\bN/?A\b', eval_text)
+    if na_matches:
+        results.append({
+            "check": "N/A usage",
+            "status": "FAIL",
+            "severity": "CRITICAL",
+            "message": f"Found {len(na_matches)} instance(s) of 'N/A' in evaluation text. Never use N/A. Always provide a substantive answer even if a trajectory failed completely.",
+        })
+
     for section_key in ["model_a_strengths", "model_b_strengths"]:
         content = find_section(eval_text, EXPECTED_SECTIONS[section_key])
         label = section_key.replace('_', ' ').title()
