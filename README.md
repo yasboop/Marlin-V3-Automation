@@ -100,10 +100,10 @@ Type `[start-full-task]` in Cursor chat. Follow the prompts. Done in 2-4 hours.
 
 1. Cursor clones the repo and checks out the pre-PR commit state
 2. Copies the `claude-hfi` binary into the repo directory
-3. Launches HFI inside a dedicated tmux session (provides proper TTY that HFI requires)
-4. **You authenticate** -- a browser window opens, log in with your ALIAS email (this is the one-time manual step per session)
-5. Cursor fills the Pre-Thread Survey (repo URL, PR URL, HEAD commit hash)
-6. After HFI launches, Cursor generates a `CLAUDE.md` file (repo overview, dev setup, testing commands, architecture, conventions) and copies it to both trajectory worktree caches at `~/.cache/claude-hfi/.../A/` and `B/`
+3. Cursor generates a `CLAUDE.md` file (repo overview, dev setup, testing commands, architecture, conventions). This is done BEFORE launching HFI so both trajectories automatically have it
+4. Launches HFI inside a dedicated tmux session (provides proper TTY that HFI requires)
+5. **You authenticate** - a browser window opens, log in with your ALIAS email (this is the one-time manual step per session)
+6. Cursor fills the Pre-Thread Survey (repo URL, PR URL, HEAD commit hash)
 
 **Phase 4-7 -- Execute 3 turns** (~1-2 hours, mostly waiting)
 
@@ -263,7 +263,7 @@ bash automation/hfi_orchestrator.sh full <tarball> <prompt>         # All-in-one
 - **Must exit HFI between turns** -- the automation handles this automatically. If doing anything manually: `Ctrl+C` to exit, then `./claude-hfi --tmux --continue`, then `/clear`
 - **Never manually `git commit`** inside HFI worktrees -- HFI manages all git state. Manual commits corrupt trajectory tracking
 - **ALIAS email for auth** -- use your Alias email at the Anthropic login page, not Google sign-in. This is critical
-- **CLAUDE.md goes AFTER HFI launch** -- launch HFI first, then create CLAUDE.md, then copy to A/B caches. The Marlin V3 guide is explicit about this order
+- **CLAUDE.md goes BEFORE HFI launch** - create CLAUDE.md after setup but before launching HFI. This way both trajectories automatically have it when HFI creates worktrees. Per official Snorkel training docs
 - **Turns missing from Snorkel** -- usually a submission upload timeout. Run `bash automation/hfi_orchestrator.sh diagnose` or see `docs/TROUBLESHOOTING.md`
 - **"Raw mode not supported"** -- HFI wasnt launched inside tmux. The automation handles this, but if manual: `tmux new-session -d -s hfi './claude-hfi --tmux'`
 - **Context limit reached** -- one trajectory used all its context. Note it in feedback as a weakness. The other trajectory is usually fine

@@ -30,9 +30,9 @@ These rules are extracted from all 6 documentation files. Violations of any = ta
 - After Turn 3 feedback: select "Finish conversation".
 
 ### CLAUDE.md Rules
-- Create AFTER launching HFI, not before.
+- Create BEFORE launching HFI (after git init + initial commit, before launch).
 - DO NOT use claude-hfi to generate CLAUDE.md.
-- Must manually copy to both A/B worktree caches (`~/.cache/claude-hfi/<project>/A/` and `/B/`).
+- Since CLAUDE.md exists in the repo before HFI starts, both trajectories automatically see it. No manual copy to worktree caches needed.
 - A bad CLAUDE.md leads to bad trajectories.
 
 ### Feedback Form Rules
@@ -926,9 +926,8 @@ After your prompt is approved and you receive the tarball, use `hfi_orchestrator
 ```bash
 # Phase 3: Environment Setup
 bash hfi_orchestrator.sh setup ~/Downloads/repo.tar       # Unpack, git init, deps, tests
+bash hfi_orchestrator.sh claude-md /path/to/repo           # Generate CLAUDE.md (BEFORE launch)
 bash hfi_orchestrator.sh launch /path/to/repo              # Copy binary, start tmux session
-bash hfi_orchestrator.sh claude-md /path/to/repo           # Generate CLAUDE.md (AFTER launch)
-bash hfi_orchestrator.sh copy-claude-md                    # Copy CLAUDE.md to A/B worktrees
 
 # Phase 4: Task Execution
 bash hfi_orchestrator.sh inject prompt.txt                 # Paste prompt into control session
@@ -954,11 +953,10 @@ bash hfi_orchestrator.sh set-session <id>                  # Manually set tmux s
 
 1. Download tarball from email, download `darwin-arm64` from feedback.anthropic.com
 2. `bash hfi_orchestrator.sh setup ~/Downloads/repo.tar` -- unpack, git init, deps, tests
-3. `bash hfi_orchestrator.sh launch-hfi /path/to/repo` -- launch HFI via tmux (proper TTY)
-4. **[HUMAN]** Authenticate in browser, enter Interface Code: `cc_agentic_coding_next`
-5. `bash hfi_orchestrator.sh claude-md /path/to/repo` -- create CLAUDE.md AFTER launch
-6. `bash hfi_orchestrator.sh copy-claude-md` -- sync CLAUDE.md to A/B worktree caches
-7. `bash hfi_orchestrator.sh inject prompt.txt` -- submits your approved prompt (Turn 1)
+3. `bash hfi_orchestrator.sh claude-md /path/to/repo` -- create CLAUDE.md BEFORE launch
+4. `bash hfi_orchestrator.sh launch-hfi /path/to/repo` -- launch HFI via tmux (proper TTY)
+5. **[HUMAN]** Authenticate in browser, enter Interface Code: `cc_agentic_coding_next`
+6. `bash hfi_orchestrator.sh inject prompt.txt` -- submits your approved prompt (Turn 1)
 8. `bash hfi_orchestrator.sh monitor` -- wait for trajectories to complete
 9. `bash hfi_orchestrator.sh fill-feedback data/turn1_feedback.txt` -- automated form fill
 10. `bash hfi_orchestrator.sh next-turn` -- kill session, relaunch, /clear
@@ -975,8 +973,8 @@ bash hfi_orchestrator.sh set-session <id>                  # Manually set tmux s
 - **MUST exit and relaunch HFI between turns** (`next-turn` does this automatically)
 - **DO NOT** run `git commit` between turns -- the CLI manages git state
 - **DO NOT** check out the PR branch -- work from the pre-PR commit
-- **CLAUDE.md** must be created AFTER launch, then copied to worktree caches
-- **DO NOT** use claude-hfi to generate CLAUDE.md -- use a separate session
+- **CLAUDE.md** must be created BEFORE launch (after setup, before HFI starts)
+- **DO NOT** use claude-hfi to generate CLAUDE.md
 - Dev environment must be set up BEFORE launching the CLI
 
 ---
@@ -1277,10 +1275,9 @@ Print a full summary and pre-filled Snorkel fields:
   PR URL: [full GitHub URL]
 
   CLAUDE.md source:
-    "I created the CLAUDE.md file and committed it to the
-     repository before starting the task. It was copied to
-     both trajectory worktree caches so both models could
-     reference it during execution."
+    "I created the CLAUDE.md file in the repo before launching
+     the HFI tool. Both models had access to it from the start
+     of the session."
 
   Prompt Type: [MUST match one of the 14 categories from Phase 2]
 
@@ -1321,7 +1318,7 @@ Print a full summary and pre-filled Snorkel fields:
 8. **NEVER use raw axis numbers (6.1, 6.2, etc.) in feedback or key-axis text** -- always use names: Correctness, Code quality, Instruction adherence, Right-sized solution, Safety judgment, Self-reporting accuracy, Professional judgment, Verification discipline, Question discipline, Senior SWE approach, Communication quality
 9. **NEVER rate all 11 axes identically** -- even when one trajectory clearly wins, differentiate per-axis based on what each model actually did. If the "loser" completed some sub-tasks, acknowledge that with moderate ratings on relevant axes
 10. **Prompt Type MUST be selected** on Snorkel -- verify before submitting
-11. **CLAUDE.md source text must accurately describe when CLAUDE.md was created** -- it was committed BEFORE Turn 1, not visible in trajectory diffs
+11. **CLAUDE.md source text must be accurate** - CLAUDE.md was created before launching HFI, both models had it from the start
 8. **All generated text uses WRITING STYLE RULES** -- feedback, prompts, evaluation text all follow the 11 humanizing rules automatically
 9. **If a trajectory fails or produces no diff**, note it and rate accordingly
 10. **Validation is mandatory** -- `prompt_validator.py` on every prompt, `eval_checker.py` on evaluation
@@ -1507,13 +1504,15 @@ HFI is running in a tmux session.
 4. Come back here and type: "authenticated"
 ```
 
-Save state: `save_task_step "LAUNCHED"`
+Save state: `save_task_step "SETUP_DONE"`
 
 ---
 
-### PHASE 3.7: CLAUDE.md CREATION
+### PHASE 3.5: CLAUDE.md CREATION (BEFORE LAUNCH)
 
-**CRITICAL: CLAUDE.md must be created AFTER HFI launch.**
+**CRITICAL: CLAUDE.md must be created BEFORE launching HFI.**
+Per official Snorkel training docs, the order is: setup -> CLAUDE.md -> launch.
+This way both trajectories automatically see CLAUDE.md when HFI creates worktrees.
 
 **[AUTOMATION]**
 ```bash
@@ -1526,17 +1525,38 @@ CLAUDE.md template generated at: <repo-path>/CLAUDE.md
 
 1. Open and edit the file to accurately describe the repo
 2. Must cover: overview, dev setup, test commands, conventions, architecture
-3. DO NOT use claude-hfi to generate this -- use a separate session
+3. DO NOT use claude-hfi to generate this
 4. A good CLAUDE.md = good trajectories. Invest time here.
 5. Type "claude-md ready" when done
 ```
 
-**[AUTOMATION]** When user is ready:
+Save state: `save_task_step "CLAUDE_MD_DONE"`
+
+---
+
+### PHASE 3.7: LAUNCH HFI
+
+**[AUTOMATION]**
 ```bash
-bash automation/hfi_orchestrator.sh copy-claude-md
+bash automation/hfi_orchestrator.sh launch-hfi <repo-path>
 ```
 
-Save state: `save_task_step "CLAUDE_MD_DONE"`
+**[YOUR TURN] Authenticate:**
+```
+HFI is running in a tmux session.
+
+1. Attach to control:
+   tmux attach -t hfi-current  (or check: tmux ls)
+
+2. Complete browser authentication (use ALIAS email, NOT Google)
+
+3. When prompted for Interface Code, enter:
+   cc_agentic_coding_next
+
+4. Come back here and type: "authenticated"
+```
+
+Save state: `save_task_step "LAUNCHED"`
 
 ---
 
@@ -1663,8 +1683,9 @@ Read `automation/data/task_state.json`. Based on `current_state`:
 - `PR_SELECTED` -> Go to Phase 2
 - `PROMPT_APPROVED` -> Go to Phase 3 (setup)
 - `SETUP_DONE` -> Go to Phase 3.5 (launch)
-- `LAUNCHED` -> Go to Phase 3.7 (CLAUDE.md)
-- `CLAUDE_MD_DONE` -> Go to Phase 4 (Turn 1 inject)
+- `SETUP_DONE` -> Go to Phase 3.5 (CLAUDE.md creation)
+- `CLAUDE_MD_DONE` -> Go to Phase 3.7 (Launch HFI)
+- `LAUNCHED` -> Go to Phase 4 (Turn 1 inject)
 - `TURN1_INJECTED` -> Monitor Turn 1
 - `TURN1_DONE` -> Start [auto-complete-task]
 - `TURN1_FEEDBACK` -> Generate Turn 2 prompt
@@ -1690,7 +1711,7 @@ for any text fields.
 | Field | Source |
 |-------|--------|
 | PR URL | `https://github.com/{owner}/{repo}/pull/{number}` |
-| Claude.md source | "I created the CLAUDE.md file and committed it to the repository before starting the task. It was copied to both trajectory worktree caches so both models could reference it during execution." |
+| Claude.md source | "I created the CLAUDE.md file in the repo before launching the HFI tool. Both models had access to it from the start of the session." |
 | Prompt Type | Match to one of the 14 categories |
 | Production ready | "No updates required - merge as is" if final turn's winner passed tests and ruff |
 | Time to complete (min) | Estimate from task start to finish |
