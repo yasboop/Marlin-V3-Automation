@@ -154,7 +154,7 @@ cmd_task_status() {
   echo -e "${YELLOW}------------------------------------------------------------${NC}"
 
   if [ ! -f "$TASK_STATE_FILE" ]; then
-    echo -e "  ${DIM}No active task. Start with: [start-full-task] in Cursor${NC}"
+    echo -e "  ${DIM}No active task. Say \"lets start a task\" in Cursor${NC}"
     echo ""
     return
   fi
@@ -2693,8 +2693,8 @@ case "$COMMAND" in
     echo "  status                   Show current Phase 3-4 state"
     echo "  task-status              Show task state machine progress"
     echo ""
-    echo -e "${DIM}For full automation (Turns 2-3 + evaluation), type${NC}"
-    echo -e "${DIM}[auto-complete-task] in Cursor after Turn 1 finishes.${NC}"
+    echo -e "${DIM}For full automation (Turns 2-3 + evaluation), say${NC}"
+    echo -e "${DIM}\"automate the rest\" in Cursor after Turn 1 finishes.${NC}"
     echo ""
     ;;
 esac

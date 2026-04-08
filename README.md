@@ -1,6 +1,6 @@
 # Marlin V3 Automation
 
-End-to-end automation for Marlin V3 HITL tasks. Open this folder in Cursor, type `[start-full-task]` in the chat, and the AI handles PR selection, prompt generation, HFI orchestration, multi-turn feedback submission, evaluation drafting, and Snorkel submission guidance.
+End-to-end automation for Marlin V3 HITL tasks. Open this folder in Cursor, say "lets start a task" in the chat, and the AI handles PR selection, prompt generation, HFI orchestration, multi-turn feedback submission, evaluation drafting, and Snorkel submission guidance.
 
 Your total manual effort: authenticate once, paste prompt into Snorkel, paste reflection into Snorkel. Everything else is automated.
 
@@ -13,7 +13,7 @@ The automation has three layers:
 ```
 You (human)
   |
-  |  type trigger commands like [start-full-task]
+  |  say "lets start a task" or describe what you need
   v
 Cursor AI (reads automation/playbook.md)
   |
@@ -25,7 +25,7 @@ Helper scripts + External systems
   - prompt_validator.py / eval_checker.py  -->  quality checks
 ```
 
-**`automation/playbook.md`** is the brain. It's a 1670-line instruction file that contains all the Marlin V3 rules, writing style guidelines, evaluation criteria, and step-by-step procedures for every phase. When you type a trigger like `[start-full-task]` in Cursor chat, the AI reads this file and follows it exactly.
+**`automation/playbook.md`** is the brain. It contains all the Marlin V3 rules, evaluation criteria, and step-by-step procedures for every phase. **`.cursor/rules/marlin-workflow.mdc`** is what makes it automatic -- this Cursor rule loads on every chat session so the AI always knows about the playbook, the writing style rules in `docs/HUMANIZER_PROMPT.md`, and all trigger commands. No manual setup needed.
 
 The shell scripts are mechanical helpers that Cursor calls on your behalf -- you rarely run them directly. `hfi_orchestrator.sh` (2700 lines) manages tmux sessions, launches HFI, injects prompts, monitors trajectories, fills feedback forms via keystrokes, and handles turn transitions. `pr_selector.sh` captures repo/PR URLs from your clipboard.
 
@@ -55,9 +55,7 @@ Also needed:
 
 2. **Open in Cursor** -- File > Open Folder > select `Marlin_V3_Automation`
 
-3. **Load the playbook into Cursor.** The automation only works if Cursor can read `automation/playbook.md`. Two ways:
-   - **Option A (recommended):** Add it as a Cursor Rule -- go to Cursor Settings > Rules > add the path `automation/playbook.md`
-   - **Option B:** Keep the file open in a tab whenever you chat with Cursor
+3. **Thats it for Cursor setup.** The folder has a `.cursor/rules/` directory with rules that load automatically. When you open a Cursor chat in this workspace, the AI already knows about the playbook, the writing style rules, and all trigger commands. No manual configuration needed.
 
 4. **Verify prerequisites:**
    ```bash
@@ -77,7 +75,7 @@ Thats it. You're ready to run your first task.
 
 ### The 30-second version
 
-Type `[start-full-task]` in Cursor chat. Follow the prompts. Done in 2-4 hours.
+Say "lets start a task" in Cursor chat. Follow the prompts. Done in 2-4 hours.
 
 ### What actually happens
 
@@ -161,12 +159,12 @@ Marlin_V3_Automation/
 |           +-- Marlin_V3_Submission_Checker_Guide.txt
 |
 |-- automation/                            # All automation code
-|   |-- playbook.md                       # THE BRAIN -- 1670 lines of workflow logic
+|   |-- playbook.md                       # THE BRAIN -- 1890 lines of workflow logic
 |   |-- hfi_orchestrator.sh              # HFI/tmux orchestrator (2700 lines)
-|   |-- pr_selector.sh                   # PR selection + clipboard capture (269 lines)
-|   |-- prompt_validator.py              # Prompt quality checker (278 lines)
-|   |-- eval_checker.py                  # Evaluation quality checker (633 lines)
-|   |-- clipboard_watcher.py            # System clipboard URL capture (186 lines)
+|   |-- pr_selector.sh                   # PR selection + clipboard capture (268 lines)
+|   |-- prompt_validator.py              # Prompt quality checker (318 lines)
+|   |-- eval_checker.py                  # Evaluation quality checker (670 lines)
+|   |-- clipboard_watcher.py            # System clipboard URL capture (185 lines)
 |   |-- requirements.txt                # Python deps (stdlib only)
 |   +-- data/                            # Runtime artifacts (gitignored)
 |       +-- .gitkeep                     # Keeps empty dir in version control
@@ -195,16 +193,44 @@ Marlin_V3_Automation/
 
 Type these in Cursor chat to start a workflow:
 
-| Trigger | What it does | When to use |
+| What you say | What happens | When to use |
 |---------|-------------|-------------|
-| `[start-full-task]` | Walks through all 8 phases end-to-end with `[AUTOMATION]` / `[YOUR TURN]` markers | **Starting a new task from scratch (use this one)** |
-| `[resume-task]` | Reads `data/task_state.json` and jumps to the right phase | Picking up after closing Cursor or hitting an error |
-| `[auto-complete-task]` | Runs Turns 2-3, evaluation, quality checks, and submission guidance | After Turn 1 is manually complete |
-| `[prepare-prompt]` | Fetches PR data and generates all 8 Snorkel Prompt Preparation fields | When you already know which PR you want |
-| `[analyze-repos]` | Reads `data/live_repos.json` and ranks repos against Marlin criteria | Phase 1 repo analysis only |
-| `[analyze-prs]` | Reads `data/live_prs.json` and ranks PRs against Marlin criteria | Phase 1 PR analysis only |
+| "lets start a task" / "new task" | Walks through all 8 phases end-to-end | **Starting a new task from scratch (use this one)** |
+| "resume" / "continue" | Reads saved state and jumps to the right phase | Picking up after closing Cursor or hitting an error |
+| "automate the rest" / "take it from here" | Runs Turns 2-3, evaluation, quality checks, submission guidance | After Turn 1 is complete |
+| "generate the prompt" / "prepare the prompt" | Fetches PR data and generates all Snorkel Prompt Preparation fields | When you already know which PR you want |
+| "analyze these repos" | Reads `data/live_repos.json` and ranks repos against Marlin criteria | Phase 1 repo analysis only |
+| "analyze these PRs" | Reads `data/live_prs.json` and ranks PRs against Marlin criteria | Phase 1 PR analysis only |
 
-For most people, `[start-full-task]` is all you need.
+For most people, "lets start a task" is all you need.
+
+---
+
+## Why tmux Mode (Not VS Code Mode)
+
+HFI supports two modes: `--vscode` (opens VS Code windows for each trajectory) and `--tmux` (runs everything in tmux sessions). This automation requires **tmux mode** because it automates the feedback form filling and prompt injection via `tmux send-keys` / `tmux load-buffer` commands. These tmux commands cant reach a regular terminal (which is what VS Code mode uses for the control pane).
+
+**If you previously used `--vscode` mode**, the switch is one flag:
+
+```bash
+# Instead of:
+claude-hfi --vscode
+
+# Use:
+claude-hfi --tmux
+```
+
+Everything else is identical: same auth, same prompts, same feedback forms, same worktrees, same multi-turn workflow. You can still open the worktree folders (`~/.cache/claude-hfi/<project>/A` and `B`) in VS Code or any editor to review code visually.
+
+| Aspect | tmux mode (this automation) | VS Code mode |
+|--------|----------------------------|--------------|
+| Launch command | `claude-hfi --tmux` | `claude-hfi --vscode` |
+| Control pane | tmux session | Regular terminal |
+| Automated form filling | Yes | No |
+| Automated prompt injection | Yes | No |
+| Code review | `git diff` or open files in any editor | VS Code diff viewer |
+
+For detailed onboarding steps, see `docs/ONBOARDING.md`.
 
 ---
 
@@ -244,7 +270,7 @@ bash automation/pr_selector.sh clean                    # Reset for fresh start
 ```bash
 bash automation/hfi_orchestrator.sh setup ~/Downloads/repo.tar     # Unpack + git init + deps
 bash automation/hfi_orchestrator.sh launch /path/to/repo            # Copy HFI binary + start tmux
-bash automation/hfi_orchestrator.sh claude-md /path/to/repo         # Generate CLAUDE.md (AFTER launch)
+bash automation/hfi_orchestrator.sh claude-md /path/to/repo         # Generate CLAUDE.md (BEFORE launch)
 bash automation/hfi_orchestrator.sh copy-claude-md                  # Copy to A/B worktree caches
 bash automation/hfi_orchestrator.sh inject prompt.txt               # Inject prompt into HFI control
 bash automation/hfi_orchestrator.sh monitor                         # Watch trajectories (2hr timeout)
@@ -291,7 +317,7 @@ bash automation/hfi_orchestrator.sh full <tarball> <prompt>         # All-in-one
 [ ] Python 3.10+ installed (python3 --version)
 [ ] claude-hfi binary in ~/Downloads/
 [ ] Python deps installed (pip3 install -r automation/requirements.txt)
-[ ] automation/playbook.md loaded as Cursor Rule or open in tab
-[ ] Type [start-full-task] in Cursor chat
+[ ] Cursor rules auto-loaded (happens automatically when you open the folder)
+[ ] Say "lets start a task" in Cursor chat
 [ ] Follow the prompts
 ```

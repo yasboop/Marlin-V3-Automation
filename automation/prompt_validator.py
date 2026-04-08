@@ -106,22 +106,59 @@ def check_role_prompting(text: str) -> list[str]:
 
 
 def check_over_prescriptive(text: str) -> list[str]:
-    """Detect over-prescriptive instruction patterns."""
+    """Detect over-prescriptive instruction patterns.
+    
+    V3 guidance: describe the PROBLEM and what SUCCESS looks like.
+    Do not hand-hold through every file, function, and design decision.
+    Over-prescriptive prompts are a rejection reason.
+    Target: 6-8 engineer-hours of complexity.
+    """
     issues = []
 
-    patterns = [
+    hard_patterns = [
         (r'(?i)on line \d+', "Line number reference"),
         (r'(?i)at line \d+', "Line number reference"),
         (r'(?i)line \d+ of', "Line number reference"),
-        (r'(?i)change .+ to .+ in .+\.py', "Specific file change instruction"),
-        (r'(?i)rename .+ to .+ in .+\.py', "Specific file rename instruction"),
         (r'(?i)step \d+:', "Numbered step-by-step instructions"),
     ]
 
-    for pattern, label in patterns:
+    for pattern, label in hard_patterns:
         matches = re.findall(pattern, text)
         if matches:
             issues.append(f"{label}: \"{matches[0]}\"")
+
+    file_ext_patterns = re.findall(
+        r'(?i)(?:in|open|edit|modify|change|update)\s+\S+\.(?:py|rs|ts|js|go|java|cpp|c|rb|kt)\b',
+        text
+    )
+    if len(file_ext_patterns) >= 4:
+        issues.append(
+            f"Found {len(file_ext_patterns)} file-specific instructions "
+            f"(V3 says describe the problem, not which files to edit)"
+        )
+
+    rename_patterns = re.findall(
+        r'(?i)\brename\s+\w+\s+to\s+\w+', text
+    )
+    change_patterns = re.findall(
+        r'(?i)\bchange\s+(?:the\s+)?\w+\s+(?:field|method|function|variable|param|type)\s+(?:from|to)\b',
+        text
+    )
+    exact_impl_count = len(rename_patterns) + len(change_patterns)
+    if exact_impl_count >= 3:
+        issues.append(
+            f"Found {exact_impl_count} exact rename/change instructions. "
+            f"V3 guidance: describe what success looks like, let the model "
+            f"figure out implementation details"
+        )
+
+    type_sigs = re.findall(r'<[^>]*(?:\'[a-z]+|impl |dyn )[^>]*>', text)
+    generic_sigs = re.findall(r'\w+<\w+(?:,\s*\w+)*>', text)
+    if len(type_sigs) + len(generic_sigs) >= 4:
+        issues.append(
+            f"Found {len(type_sigs) + len(generic_sigs)} type signatures/generics. "
+            f"Consider describing the desired behavior instead of exact types"
+        )
 
     return issues
 

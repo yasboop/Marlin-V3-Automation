@@ -30,10 +30,12 @@ These rules are extracted from all 6 documentation files. Violations of any = ta
 - After Turn 3 feedback: select "Finish conversation".
 
 ### CLAUDE.md Rules
-- Create BEFORE launching HFI (after git init + initial commit, before launch).
+- Create AFTER the initial commit but BEFORE launching HFI (`touch CLAUDE.md`, edit contents, then launch).
 - DO NOT use claude-hfi to generate CLAUDE.md.
 - Since CLAUDE.md exists in the repo before HFI starts, both trajectories automatically see it. No manual copy to worktree caches needed.
 - A bad CLAUDE.md leads to bad trajectories.
+- **GITIGNORE CHECK:** If CLAUDE.md doesnt appear in the trajectory VSCode/tmux windows, check if the repo has a `.gitignore` entry for CLAUDE.md. If so: remove the CLAUDE.md file, remove the .gitignore entry, do another commit, re-create CLAUDE.md, then relaunch HFI.
+- **CLAUDE_ENV_FILE:** If the project uses conda/virtualenv/nvm, create an env activation script and `export CLAUDE_ENV_FILE=./env-setup.sh` before launching HFI. This ensures both trajectories have the correct environment.
 
 ### Feedback Form Rules
 - Strengths must be EVALUATIVE, not descriptive. Use "because" / "which means" to explain impact.
@@ -54,8 +56,9 @@ These rules are extracted from all 6 documentation files. Violations of any = ta
 ### Environment Rules
 - Interface code for V3: `cc_agentic_coding_next`
 - Use ALIAS email for auth, not Google account.
-- If repo has virtual env, set `CLAUDE_ENV_FILE` before launching HFI.
-- Keep tmux trajectory sessions visible -- approve permission prompts manually.
+- If repo has virtual env/conda/nvm, create an activation script and `export CLAUDE_ENV_FILE=./env-setup.sh` before launching HFI. HFI sources this before every Bash command in both trajectories.
+- Keep tmux trajectory sessions visible - approve permission prompts manually.
+- **Dev environment MUST be fully configured before Turn 1**: install deps, set up venvs, verify baseline tests pass. Do NOT penalize models for env failures if setup wasnt done.
 
 ### Official V3 Prompt Categories (14)
 1. Git  2. Ambiguous  3. Discussion  4. Explaining  5. Code Review
@@ -67,106 +70,17 @@ These rules are extracted from all 6 documentation files. Violations of any = ta
 ## WRITING STYLE RULES (APPLY TO ALL GENERATED TEXT)
 
 When generating any text that the user will paste into Snorkel or submit,
-follow these rules to produce natural-sounding human writing:
+read and follow the writing style rules in `docs/HUMANIZER_PROMPT.md`.
+That file is the single source of truth for all humanizing rules.
 
-1. COMPACT TECHNICAL LISTS: No spaces after commas in technical 
-   term lists. Write "VAE,UNet,SD3,Flux" not "VAE, UNet, SD3, Flux"
-   
-2. DROP APOSTROPHES: Write "dont", "its", "wont", "thats", "doesnt",
-   "isnt", "cant" instead of the contracted forms
+The rules cover three layers:
+- Layer 1 (formatting): compact lists, dropped apostrophes, spacing quirks
+- Layer 2 (structure): killed contrasts, fragments, dev shorthand
+- Layer 3 (phrasing): natural developer phrasing patterns (7% AI detection)
 
-3. OCCASIONAL SPACING QUIRKS: Sometimes put a space before a comma
-   like "makes it harder ,plus" -- not every comma, just 1 in 4
-
-4. USE ABBREVIATIONS: param (not parameter), repo (not repository),
-   config (not configuration), deps (not dependencies), 
-   SOTA (not state-of-the-art), dev (not development)
-
-5. NO DOUBLE HYPHENS: Never use "--" in generated text. Use commas,
-   periods, or " - " (single hyphen with spaces) instead. Double
-   hyphens are an LLM writing signature and get flagged by reviewers
-
-6. NO TRAILING PERIODS: Drop the period from the last sentence
-   of each section
-
-7. INFORMAL PHRASING: Use casual phrases like "all over the place"
-   instead of "fragmented", "a bunch of" instead of "multiple",
-   "set up" instead of "implement"
-
-8. NO PERFECT PARALLEL STRUCTURE: Avoid balanced "both X and Y"
-   or "not only X but also Y" constructions. Just say things plainly
-
-9. RUN-ON SENTENCES: Use comma splices instead of always starting
-   new sentences. Chain thoughts with commas
-
-10. COMPACT PARENTHETICALS: No spaces inside parenthetical groups.
-    Write "(DiT,PixArt,Flux,SD3)" not "(DiT, PixArt, Flux, SD3)"
-
-11. VARY OPENERS: Never start consecutive bullets or list items with
-    the same phrase. Mix up how each one begins -- some with the subject,
-    some with a verb, some just stating the end state directly.
-    BAD: "Done when X... Done when Y... Done when Z..."
-    GOOD: "X verifies that... All duplicate Y removed from... Empty Z methods have..."
-
-### EXAMPLE 1 (follow this style exactly)
-
-BAD (high AI detection):
-"The gradient checkpointing test coverage across the diffusers model test
-suite is fragmented. Multiple model test files (VAE, UNet2DCondition,
-UNetMotion, UNetSpatioTemporal, ControlNetXS) each carry their own
-copy-pasted implementation of gradient checkpointing verification logic,
-including both the numerical equivalence test (forward pass with and without
-checkpointing, comparing loss and parameter gradients) and the module
-registration test (monkey-patching _set_gradient_checkpointing to track
-which modules get enabled). This duplication makes maintenance expensive
-and leaves newer transformer model tests without any gradient checkpointing
-coverage at all. The work involves consolidating these tests into the
-shared ModelTesterMixin so every model that supports gradient checkpointing
-gets tested uniformly."
-
-GOOD (1% AI detection):
-"The gradient checkpointing tests across the diffusers test suite are all
-over the place right now. The VAE,UNet2DCondition,UNetMotion,UNetSpatioTemporal
-and ControlNetXS test files each have their own copy-pasted version of the
-gradient checkpointing verification logic - the numerical equivalence
-check(forward pass with and without checkpointing,comparing loss and param
-gradients) and the module registration check(monkey-patching
-_set_gradient_checkpointing to track which modules get enabled). Its a lot
-of duplicated code that makes maintaining things harder ,plus the newer
-transformer model tests dont even have any gradient checkpointing coverage.
-The fix is consolidating all of this into the shared ModelTesterMixin so
-all models that support gradient checkpointing get tested the same way"
-
-### EXAMPLE 2
-
-BAD (high AI detection):
-"Diffusers is a PyTorch library maintained by Hugging Face for
-state-of-the-art diffusion models covering image, video, and audio
-generation. The codebase organizes models into subpackages -- autoencoders
-(VAE variants), UNets (2D conditional, motion, spatiotemporal, ControlNetXS),
-and transformers (DiT, PixArt, Flux, SD3, CogVideoX, Allegro, AuraFlow,
-Latte, CogView3Plus). Each model class inherits from a shared ModelMixin
-base, and the test suite mirrors this structure with a common test mixin
-(ModelTesterMixin in test_modeling_common.py) that individual model test
-files extend."
-
-GOOD (1% AI detection):
-"Diffusers is a PyTorch library maintained by Hugging Face for SOTA
-diffusion models that covers image,video and audio generation. The codebase
-organizes the models into subpackages autoencoders ,VAE variants,
-UNets(2Dconditional,motion,spatiotemporal,ControlNetXS) and
-transformers(DiT,PixArt,Flux,SD3,CogVideoX,Allegro,AuraFlow,Latte,CogView3Plus),
-Each model class inherits from a shared ModelMixin base, and the test suite
-mirrors this structure with a common test mixin(ModelTesterMixin in
-test_modeling_common.py) that individual model test files extend"
-
-Key changes: "SOTA" instead of "state-of-the-art", missing space after commas
-in "image,video", space before comma in "autoencoders ,VAE", compact
-parenthetical groups with no spaces, comma splice instead of period between
-sentences, no trailing period.
-
-Both examples show: same content, same meaning -- only formatting
-imperfections and casual phrasing differ.
+Apply ALL three layers to every piece of generated text: prompts,
+feedback, evaluations, reflections, follow-up prompts, edge cases,
+acceptance criteria, repo definitions, PR definitions - everything.
 
 ---
 
@@ -379,18 +293,20 @@ RULES for follow-up prompts:
 
 ## HOW TO USE
 
-Ask Cursor one of these:
+Just talk to Cursor naturally. The AI recognizes what you need from context:
 
-| Trigger Prompt | Phase | What It Does |
+| What you say | Phase | What happens |
 |---|---|---|
-| `[analyze-repos]` | 1 | Read `live_repos.json` -> fetch repo data via `gh` -> rank repos |
-| `[analyze-prs]` | 1 | Read `live_prs.json` -> fetch PR data via `gh` -> rank PRs |
-| `[full-analysis]` | 1 | Both repo + PR analysis sequentially |
-| `[prepare-prompt]` | 2 | Fetch PR diff + code -> generate all Prompt Preparation fields |
+| "analyze these repos", "check these repos" | 1 | Reads `live_repos.json`, fetches repo data via `gh`, ranks repos |
+| "analyze these PRs", "check these PRs" | 1 | Reads `live_prs.json`, fetches PR data via `gh`, ranks PRs |
+| "analyze both repos and PRs" | 1 | Both repo + PR analysis sequentially |
+| "generate the prompt", "prepare the prompt" | 2 | Fetches PR diff + code, generates all prompt fields |
+| "lets start a task", "new task", "start" | All | End-to-end guided workflow from Phase 1 to 8 |
+| "continue from where we left off", "resume" | Any | Resumes from last saved state |
 
 ---
 
-## STEP 1: REPO ANALYSIS — `[analyze-repos]`
+## STEP 1: REPO ANALYSIS
 
 When triggered, follow these steps **exactly**:
 
@@ -487,7 +403,7 @@ Apply these criteria to EACH repo:
 
 ---
 
-## STEP 2: PR ANALYSIS — `[analyze-prs]`
+## STEP 2: PR ANALYSIS
 
 When triggered, follow these steps **exactly**:
 
@@ -645,7 +561,7 @@ Categories in **bold** are the hardest for models and thus best for Marlin.
 ---
 ---
 
-# PHASE 2 -- PROMPT PREPARATION -- `[prepare-prompt]`
+# PHASE 2 -- PROMPT PREPARATION
 
 > Phase 2 takes the selected repo + PR from Phase 1 and generates all the fields
 > needed for the Snorkel Prompt Preparation form. Cursor fetches the actual PR diff,
@@ -779,13 +695,24 @@ Example:
 - "Done when the old utility module is fully removed and no imports reference it"
 - "Done when existing tests pass and new tests cover the restructured data shapes"
 
-### FIELD 7: Testing Setup
+### FIELD 7: Effort and Complexity (V3 REQUIREMENT)
+
+2-4 sentences explaining WHY this task is non-trivial. This is NOT a restatement of the task. Focus on:
+- Number of files/modules touched and cross-component dependencies
+- Subtle interactions that require careful analysis
+- Edge cases where naive approaches break
+- Why a competent engineer would need 6-8 hours
+
+Bad: "This task requires changing 17 files across 4 crates."
+Good: "The trait is implemented by 6 different type relations spread across 4 compiler crates, each with its own constraints on how goals flow through the system. The opaque type handling path converts between Goal and Obligation at multiple boundaries, and getting any one conversion wrong silently breaks downstream diagnostic reporting. A naive search-and-replace misses the cases where the cause must be preserved for error messages."
+
+### FIELD 8: Testing Setup
 
 Output: "Yes" or "No"
 
 This depends on whether the user has actually set up the repo locally. If unknown, output "Yes" with a note that the user must verify this before submitting.
 
-### FIELD 8: Initial Prompt (THE CRITICAL FIELD)
+### FIELD 9: Initial Prompt (THE CRITICAL FIELD)
 
 This is the actual prompt text that will be given to the model. This is the most important field.
 
@@ -795,8 +722,8 @@ This is the actual prompt text that will be given to the model. This is the most
 1. NO em-dashes. Use regular hyphens (-) or commas instead. Never use the character "--" (the long dash). This is a model signature that will get the submission rejected.
 2. NO PR references. Never mention PR numbers, branch names, or "this PR". Write as if you are the developer planning this work from scratch.
 3. NO role-based prompting. Never write "You are a senior engineer" or "Act as an expert". Just describe the work directly.
-4. NO over-prescriptive instructions. Do NOT say "on line 47, change X to Y" or "in file foo.py, rename function bar to baz". Describe the PROBLEM and what SUCCESS looks like. Let the model figure out the implementation.
-5. NO hand-holding. Do not walk the model through every step. Describe what needs to be built/fixed/refactored and what the acceptance criteria are.
+4. NO over-prescriptive instructions (V3 REJECTION REASON). Do NOT say "on line 47, change X to Y" or "rename function bar to baz in file foo.py". Do NOT specify exact method renames, type signatures, or field changes. Describe the PROBLEM and what SUCCESS looks like. Let the model figure out implementation details. Think: "what would I write in a GitHub issue?" not "what would I write in a code review comment."
+5. NO hand-holding. Do not walk the model through every step or every file. A good prompt targets 6-8 engineer-hours of complexity. If you find yourself listing more than 3-4 specific functions/methods to change, you are being too prescriptive.
 6. NO generic filler. Every sentence must carry specific, technical content. No "ensure code quality" or "follow best practices" without saying what that means concretely.
 
 **REQUIRED QUALITIES:**
@@ -819,9 +746,114 @@ This is the actual prompt text that will be given to the model. This is the most
 
 Notice: no em-dashes, no role-based prompting, names exact components, verifiable outcomes, reads like a real issue, human-sounding.
 
+**OVER-PRESCRIPTIVE vs APPROPRIATELY SCOPED (V3 critical distinction):**
+
+Models are capable of significant independent engineering judgment.
+Prompts that micromanage every implementation step deprive reviewers
+of the ability to evaluate that capability, and push submissions
+towards a style that can appear LLM-generated. Describe the problem
+clearly and state what success looks like - but do not hand-hold
+the model through every file, function, and design decision. Leave
+space for the model to figure things out.
+
+Over-prescriptive (AVOID - rejection reason):
+"In api/search.py, on line 47, change the call from decode('ascii') to
+decode('utf-8'). Then open tests/test_search.py and add a test named
+test_non_ascii_query..."
+
+Appropriately scoped (AIM FOR):
+"Requests to /api/search return 500 when the query contains non-ASCII
+characters. Fix the encoding/decoding path so unicode queries work
+correctly and add regression test coverage."
+
+**HOW TO CONVERT A PRESCRIPTIVE PROMPT TO APPROPRIATELY SCOPED:**
+
+You CAN and SHOULD name exact components, identifiers, subsystems from
+the codebase. The good example from the Marlin guide names exact things:
+"isFinalSpecialization attribute", "classifier property editor",
+"UML Dependency elements", "GTK UI definitions". Naming things is NOT
+prescriptive. What IS prescriptive is telling the model exactly HOW to
+change them step by step.
+
+The distinction: use identifiers to describe the CURRENT STATE and
+WHAT IS WRONG, not to give step-by-step implementation instructions.
+Think "what would I write in a GitHub issue?" not "what would I write
+in a code review telling someone exactly what to change."
+
+Prescriptive patterns to convert:
+
+  "Rename X to Y"
+  --> describe why X is a problem, let model figure out the rename
+
+  "Change field from TypeA to TypeB"
+  --> describe what behavior the component should have instead
+
+  "Add method foo that does bar"
+  --> describe what capability is needed without naming the method
+
+  "In file.rs, change call from A to B"
+  --> name the logical layer/boundary, not the file
+
+  "Update all call sites across crate1, crate2, crate3"
+  --> delete, the model will find call sites on its own
+
+  "Remove the XAlias type alias from module/mod.rs"
+  --> "clean up whatever aliases become unnecessary"
+
+  3+ specific functions doing similar work listed individually
+  --> merge into one concept phrase ("the opaque type handling path")
+
+REAL EXAMPLE (Rust compiler prompt):
+
+Before (prescriptive - lists exact renames and type changes):
+"Refactor the ObligationEmittingRelation trait. Rename the trait to
+PredicateEmittingRelation. Change register_obligations to register_goals
+accepting Goal<'tcx, ty::Predicate<'tcx>>. In CombineFields change the
+obligations field from Vec<PredicateObligation> to Vec<Goal>. Add an
+into_obligations method on CombineFields. Update handle_opaque_type in
+InferCtxt to accept Span instead of &ObligationCause."
+
+After (appropriately scoped - describes problem and desired outcome):
+"The type relation layer in rustc_infer is mixing solver concerns with
+diagnostics concerns. Every relation operation produces full Obligation
+objects with ObligationCause, but the solver only needs predicate and
+param_env. The trait controlling how relations give their output needs
+to work with Goal objects instead of carrying the whole Obligation
+around. ObligationCause attachment should move outward to the public
+API boundary. The combine-fields machinery should collect goals
+internally, conversion to obligations should happen only when results
+are being surfaced. The opaque type handling path should take Span
+instead of a full cause and return goals. Whatever type aliases become
+unnecessary after this, clean those up. Compiler bootstrap and tests
+must pass, diagnostics output stays the same."
+
+Notice: the "after" version still names ObligationEmittingRelation,
+ObligationCause, Goal, CombineFields, Span - real identifiers from the
+codebase. But it describes WHAT the current state is and WHAT the end
+state should be, not HOW to get there step by step.
+
 ---
 
-## 3D. Post-generation quality check
+## 3D. Snorkel Grammar Feedback Fix
+
+Snorkel runs an automated grammar checker on submissions. If it flags issues,
+fix ONLY the specific items mentioned. Common fixes:
+- Add spaces after commas everywhere: "(subtyping, equating, LUB, GLB)" not "(subtyping,equating,LUB,GLB)"
+- Add articles back where flagged ("The solver" not "Solver")
+- Add commas before "and" in compound sentences
+- Break long run-on sentences into shorter ones with periods
+- Fix awkward phrasing ("causes get constructed" not "cause gets constructed")
+- Add proper spacing around parentheticals
+
+IMPORTANT: Snorkel's grammar checker conflicts with humanizing rules 1, 3, and 10
+(compact lists, spacing quirks, compact parentheticals). When Snorkel flags these,
+fix them. Keep the OTHER humanizing rules that Snorkel doesnt flag: dropped
+apostrophes, code identifiers, terse phrasing, sentence fragments it accepts,
+no logical connectors, dev shorthand.
+
+---
+
+## 3E. Post-generation quality check
 
 After generating all fields, run the prompt quality validator:
 
@@ -879,6 +911,13 @@ ACCEPTANCE CRITERIA:
 3. [verifiable criterion]
 ...
 
+EFFORT AND COMPLEXITY:
+[2-4 sentences explaining WHY this task is non-trivial. Include:
+number of files/modules involved, cross-component interactions,
+edge cases requiring careful analysis, why a competent engineer
+would need 6-8 hours. This is NOT a restatement of the task -
+it explains what makes it HARD.]
+
 TESTING SETUP: [Yes/No]
 
 ------------------------------------------------------------
@@ -887,7 +926,10 @@ PROMPT DEFINITION
 
 INITIAL PROMPT:
 [The actual prompt text -- 150-300 words, human-sounding, no em-dashes,
-no PR references, no role prompting, not over-prescriptive]
+no PR references, no role prompting, not over-prescriptive.
+V3: describe the PROBLEM and SUCCESS criteria. Do NOT hand-hold
+through every file/function/rename. Let the model figure out
+implementation details.]
 
 ============================================================
 QUALITY CHECK RESULTS
@@ -895,7 +937,7 @@ QUALITY CHECK RESULTS
 - Em-dashes found: [Yes/No -- if Yes, list and fix them]
 - PR references found: [Yes/No -- if Yes, list and fix them]
 - Role-based prompting: [Yes/No -- if Yes, list and fix them]
-- Over-prescriptive: [Yes/No -- assessment]
+- Over-prescriptive: [Yes/No -- assessment per V3 guidance]
 - Word count: [N words]
 - Reads like human-written issue: [Yes/No -- assessment]
 ============================================================
@@ -979,9 +1021,12 @@ bash hfi_orchestrator.sh set-session <id>                  # Manually set tmux s
 
 ---
 
-## [auto-complete-task] -- FULL MULTI-TURN AUTOMATION
+## FULL MULTI-TURN AUTOMATION
 
-When the user types `[auto-complete-task]`, you orchestrate the complete remaining workflow: capture diffs, compare trajectories, generate follow-up prompts for Turns 2-3, and produce the final evaluation writeup.
+When the user says something like "automate the rest", "handle the remaining turns",
+"continue with turns 2 and 3", or "take it from here" after Turn 1 is done,
+orchestrate the complete remaining workflow: capture diffs, compare trajectories,
+generate follow-up prompts for Turns 2-3, and produce the final evaluation writeup.
 
 **Prerequisites:** Turn 1 must be complete (trajectories finished, feedback form showing).
 
@@ -1037,6 +1082,25 @@ Read both diff files completely. For each trajectory, evaluate:
 3. **Code quality:** Is it well-structured, follows codebase conventions?
 4. **Tests:** Did it add/update tests? Do they cover the right cases?
 5. **Side effects:** Any unnecessary changes, broken imports, unrelated modifications?
+
+**V3 TRACE REVIEW (Step 5 requirement):**
+Also review model traces (reasoning/tool calls in tmux sessions), not just diffs:
+- Did the model actually RUN tests, or only claim it did?
+- Did it investigate root cause, or just patch symptoms?
+- Did it avoid risky actions (delete, force push, reset) without confirmation?
+- Did it keep scope tight and avoid unrelated changes?
+- Did it accurately report what it changed vs what actually changed in the diff?
+- Did it stop to ask clarification when something was genuinely ambiguous?
+
+Reference trace behavior in your strengths/weaknesses text (e.g. "Model A ran the
+full test suite and fixed 2 failures before declaring done, while Model B only
+claimed tests pass without evidence in the trace").
+
+**DEV ENVIRONMENT RULE (V3 requirement):**
+Do NOT penalize either trajectory for failing to install dependencies, failing to
+run tests due to missing packages, or environment configuration issues. If a model
+fails because the dev environment wasnt set up beforehand, that is a SETUP issue -
+not a model deficiency. Note it in your feedback but do not let it affect ratings.
 
 Determine the winner (A or B). Write a brief justification (2-3 sentences).
 
@@ -1114,7 +1178,7 @@ Save directly to: `automation/data/turn2_prompt.txt`
 
 Validate with:
 ```bash
-python3 automation/prompt_validator.py automation/data/turn2_prompt.txt
+python3 automation/prompt_validator.py --file automation/data/turn2_prompt.txt
 ```
 
 Fix any validator failures automatically. Re-validate until clean.
@@ -1306,7 +1370,7 @@ Print a full summary and pre-filled Snorkel fields:
 ================================================================
 ```
 
-### CRITICAL RULES FOR [auto-complete-task]
+### CRITICAL RULES FOR MULTI-TURN AUTOMATION
 
 1. **Exit and relaunch between every turn** -- NEVER keep HFI running continuously
 2. **Do NOT run `git commit` between turns** -- HFI manages git state
@@ -1331,9 +1395,13 @@ Print a full summary and pre-filled Snorkel fields:
 
 ---
 
-## [start-full-task] -- END-TO-END GUIDED WORKFLOW
+## END-TO-END GUIDED WORKFLOW
 
-When the user types `[start-full-task]`, guide them through the COMPLETE Marlin V3 workflow from Phase 1 to Phase 8. At every step, clearly mark `[AUTOMATION]` or `[YOUR TURN]`. Never leave the user wondering what to do next.
+When the user wants to start a new task (says "lets start a task", "new task",
+"start", or anything indicating they want to begin a Marlin V3 task), guide them
+through the COMPLETE workflow from Phase 1 to Phase 8. At every step, clearly
+mark what you handle automatically vs what they need to do. Never leave the user
+wondering what to do next.
 
 Initialize state:
 ```bash
@@ -1361,7 +1429,7 @@ Print banner:
     3. Final Snorkel web submission (copy-paste)
 
   Estimated time: 2-4 hours depending on trajectory runtime.
-  You can resume anytime with: [resume-task]
+  You can resume anytime by saying "resume" or "continue from where we left off"
 ================================================================
 ```
 
@@ -1379,14 +1447,14 @@ Print banner:
 ```bash
 bash automation/pr_selector.sh repos
 ```
-Analyze repos using `[analyze-repos]`. Present ranked results.
+Analyze repos using the repo analysis workflow (STEP 1). Present ranked results.
 
 **[YOUR TURN]**
 1. Select the recommended repo on Snorkel
 2. Browse PRs, copy 3-5 PR URLs
 3. Paste them here
 
-**[AUTOMATION]** Analyze PRs using `[analyze-prs]`. Present results.
+**[AUTOMATION]** Analyze PRs using the PR analysis workflow (STEP 2). Present results.
 
 **[YOUR TURN]**
 1. Select the top PR on Snorkel
@@ -1406,7 +1474,7 @@ Save state: `save_task_step "PR_SELECTED"`
 
 When user says "PR selected", proceed.
 
-**[AUTOMATION]** Run `[prepare-prompt]` workflow for the selected PR. Generate all fields:
+**[AUTOMATION]** Run the prompt preparation workflow for the selected PR. Generate all fields:
 - Repo Definition, PR Definition, Edge Cases, Acceptance Criteria, Initial Prompt
 - Validate with `prompt_validator.py`
 
@@ -1530,6 +1598,20 @@ CLAUDE.md template generated at: <repo-path>/CLAUDE.md
 5. Type "claude-md ready" when done
 ```
 
+**[AUTOMATION] Post-creation checks:**
+```bash
+# Check if repo .gitignore blocks CLAUDE.md
+if grep -q 'CLAUDE.md' <repo-path>/.gitignore 2>/dev/null; then
+  echo "WARNING: .gitignore contains CLAUDE.md entry!"
+  echo "HFI trajectory windows will NOT see the file."
+  echo "Fix: remove the CLAUDE.md line from .gitignore, commit, then re-create CLAUDE.md"
+fi
+
+# If project uses conda/virtualenv, set up CLAUDE_ENV_FILE
+# echo 'conda activate myenv' > env-setup.sh
+# export CLAUDE_ENV_FILE=./env-setup.sh
+```
+
 Save state: `save_task_step "CLAUDE_MD_DONE"`
 
 ---
@@ -1599,8 +1681,7 @@ When complete, tell user:
   TURN 1 COMPLETE
 ================================================================
 
-  Type: [auto-complete-task] to automate everything from here.
-  I will:
+  Say "automate the rest" or "take it from here" and I will:
     - Analyze diffs and determine winners
     - Generate all feedback text (using humanizing rules)
     - Fill HFI feedback forms automatically
@@ -1618,7 +1699,7 @@ Save state: `save_task_step "TURN1_DONE"`
 
 ### PHASES 5-7: TURNS 2-3 + EVALUATION + QUALITY (FULLY AUTOMATED)
 
-The `[auto-complete-task]` trigger handles everything from here:
+The multi-turn automation handles everything from here:
 - Captures diffs, analyzes trajectories, determines winners
 - Generates all feedback text using WRITING STYLE RULES
 - Fills HFI feedback forms automatically via `cmd_fill_feedback`
@@ -1662,15 +1743,17 @@ After user confirms:
 ================================================================
 
   Submitted. Check Snorkel for status updates.
-  To start a new task: [start-full-task]
+  To start a new task, just say "lets start a new task"
 ================================================================
 ```
 
 ---
 
-## [resume-task] -- RESUME FROM LAST STATE
+## RESUME FROM LAST STATE
 
-When the user types `[resume-task]`, read the task state and resume from where they left off.
+When the user wants to resume (says "resume", "continue", "pick up where we left off",
+or anything indicating they want to continue a previous task), read the task state
+and resume from where they left off.
 
 **[AUTOMATION]**
 ```bash
@@ -1687,7 +1770,7 @@ Read `automation/data/task_state.json`. Based on `current_state`:
 - `CLAUDE_MD_DONE` -> Go to Phase 3.7 (Launch HFI)
 - `LAUNCHED` -> Go to Phase 4 (Turn 1 inject)
 - `TURN1_INJECTED` -> Monitor Turn 1
-- `TURN1_DONE` -> Start [auto-complete-task]
+- `TURN1_DONE` -> Start multi-turn automation
 - `TURN1_FEEDBACK` -> Generate Turn 2 prompt
 - `TURN2_INJECTED` -> Monitor Turn 2
 - `TURN2_DONE` -> Turn 2 feedback + Turn 3

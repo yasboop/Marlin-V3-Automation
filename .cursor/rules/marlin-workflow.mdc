@@ -1,0 +1,30 @@
+---
+description: Marlin V3 HITL automation - routes all workflow actions through the playbook
+alwaysApply: true
+---
+
+# Marlin V3 Automation
+
+This workspace is a Marlin V3 Human-in-the-Loop (HITL) task automation suite.
+
+## Critical Rule
+
+DO NOT take any workflow action, generate any submittable text, or make any
+decision on your own. Everything you need to know is in two files:
+
+1. **`automation/playbook.md`** -- the complete workflow, rules, procedures,
+   evaluation criteria, and step-by-step instructions for every phase.
+   Read this file FIRST whenever the user wants to do anything related to
+   Marlin tasks (starting a task, analyzing repos/PRs, generating prompts,
+   running turns, writing feedback, submitting). Every answer to "how do I
+   do X" is in the playbook. Follow it exactly.
+
+2. **`docs/HUMANIZER_PROMPT.md`** -- writing style rules that MUST be applied
+   to ALL generated text (prompts, feedback, evaluations, reflections,
+   follow-ups, edge cases, acceptance criteria, repo/PR definitions).
+   Read this file and apply its rules to every piece of text you generate.
+   No exceptions.
+
+Do not improvise, do not guess, do not rely on your own knowledge of
+Marlin or HITL processes. The playbook is the single source of truth.
+If something isnt covered in the playbook, ask the user.

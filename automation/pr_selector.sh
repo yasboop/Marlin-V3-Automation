@@ -26,8 +26,7 @@ set -euo pipefail
 #   ./pr_selector.sh status     -> Show current data state
 #   ./pr_selector.sh clean      -> Wipe data/ for fresh start
 #
-# After capture, ask Cursor:
-#   [analyze-repos]  or  [analyze-prs]  or  [prepare-prompt]
+# After capture, tell Cursor to analyze (e.g. "analyze these repos")
 #
 # ============================================================================
 
@@ -130,11 +129,9 @@ print(len(d.get('entries', [])))
   echo ""
 
   if [ "$mode" = "repos" ]; then
-    echo -e "    ${CYAN}Read automation/playbook.md${NC}"
-    echo -e "    ${CYAN}then [analyze-repos]${NC}"
+    echo -e "    ${CYAN}\"analyze these repos\"${NC}"
   else
-    echo -e "    ${CYAN}Read automation/playbook.md${NC}"
-    echo -e "    ${CYAN}then [analyze-prs]${NC}"
+    echo -e "    ${CYAN}\"analyze these PRs\"${NC}"
   fi
 
   echo ""
@@ -255,8 +252,8 @@ case "$COMMAND" in
     echo "  status      Show current data state"
     echo "  clean       Wipe data for fresh start"
     echo ""
-    echo "After clipboard capture, ask Cursor:"
-    echo "  [analyze-repos]  or  [analyze-prs]  or  [prepare-prompt]"
+    echo "After clipboard capture, tell Cursor:"
+    echo "  \"analyze these repos\"  or  \"analyze these PRs\"  or  \"generate the prompt\""
     echo ""
     echo -e "${BOLD}Phase 3-4 -- Env Setup + Execution:${NC}"
     echo "  Run: bash hfi_orchestrator.sh help"
