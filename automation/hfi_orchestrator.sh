@@ -124,6 +124,35 @@ p.write_text(json.dumps(d, indent=2))
 "
 }
 
+require_step() {
+  local required_step="$1"
+  local action_name="$2"
+  if [ ! -f "$TASK_STATE_FILE" ]; then
+    return 0
+  fi
+  local has_step
+  has_step=$("$PYTHON" -c "
+import json, pathlib
+p = pathlib.Path('$TASK_STATE_FILE')
+d = json.loads(p.read_text()) if p.exists() else {}
+steps = d.get('completed_steps', [])
+print('yes' if '$required_step' in steps else 'no')
+")
+  if [ "$has_step" = "no" ]; then
+    echo -e "  ${RED}BLOCKED: '$action_name' requires '$required_step' to be completed first.${NC}"
+    echo -e "  ${DIM}Current completed steps:${NC}"
+    "$PYTHON" -c "
+import json, pathlib
+d = json.loads(pathlib.Path('$TASK_STATE_FILE').read_text())
+for s in d.get('completed_steps', []):
+    print(f'    [done] {s}')
+"
+    echo ""
+    return 1
+  fi
+  return 0
+}
+
 save_task_field() {
   local key="$1" value="$2"
   "$PYTHON" -c "
@@ -830,16 +859,17 @@ cmd_launch() {
   echo -e "    ${BOLD}cc_agentic_coding_next${NC}"
   echo ""
   echo -e "  ${YELLOW}════════════════════════════════════════════════════════════${NC}"
-  echo -e "  ${BOLD}IMPORTANT -- CLAUDE.md WORKFLOW (Marlin V3 requirement):${NC}"
+  echo -e "  ${BOLD}NOTE: CLAUDE.md should have been created BEFORE launch.${NC}"
   echo -e "  ${YELLOW}════════════════════════════════════════════════════════════${NC}"
   echo ""
-  echo -e "  1. Create CLAUDE.md NOW (after HFI launch, not before):"
-  echo -e "     ${CYAN}bash $0 claude-md $repo_path${NC}"
+  echo -e "  ${DIM}If you already created CLAUDE.md before launching, both${NC}"
+  echo -e "  ${DIM}trajectories see it automatically. No copy needed.${NC}"
   echo ""
-  echo -e "  2. Copy it to BOTH worktree caches (HFI won't auto-sync):"
+  echo -e "  ${DIM}If you forgot, create it now and copy to worktrees:${NC}"
+  echo -e "     ${CYAN}bash $0 claude-md $repo_path${NC}"
   echo -e "     ${CYAN}bash $0 copy-claude-md${NC}"
   echo ""
-  echo -e "  3. ${RED}Do NOT use claude-hfi to generate CLAUDE.md.${NC}"
+  echo -e "  ${RED}Do NOT use claude-hfi to generate CLAUDE.md.${NC}"
   echo ""
 }
 
@@ -867,6 +897,8 @@ cmd_set_session() {
 # ---------------------------------------------------------------------------
 
 cmd_inject() {
+  require_step "LAUNCHED" "inject prompt" || exit 1
+
   local prompt_source="${1:-}"
   local session_id
   session_id=$(load_state session_id)
@@ -1247,6 +1279,391 @@ cmd_capture_diffs() {
 }
 
 # ---------------------------------------------------------------------------
+# capture-traces: Save trajectory tmux output for trace review
+# ---------------------------------------------------------------------------
+
+cmd_capture_traces() {
+  local turn_num="${1:-1}"
+  local session_id
+  session_id=$(load_state session_id)
+
+  if [ -z "$session_id" ]; then
+    echo -e "  ${RED}No session ID found. Run 'launch' first.${NC}"
+    exit 1
+  fi
+
+  echo -e "${BOLD}CAPTURE TRACES -- Turn $turn_num${NC}"
+  echo -e "${YELLOW}------------------------------------------------------------${NC}"
+
+  local sess_a="${session_id}-A"
+  local sess_b="${session_id}-B"
+
+  mkdir -p "$STATE_DIR"
+
+  if tmux has-session -t "$sess_a" 2>/dev/null; then
+    tmux capture-pane -t "$sess_a" -p -S -500 > "$STATE_DIR/turn${turn_num}_trace_A.txt" 2>&1
+    local lines_a
+    lines_a=$(wc -l < "$STATE_DIR/turn${turn_num}_trace_A.txt" | tr -d ' ')
+    echo -e "  ${GREEN}ok${NC} Trajectory A trace: $lines_a lines -> data/turn${turn_num}_trace_A.txt"
+  else
+    echo -e "  ${YELLOW}Trajectory A session not found (${sess_a})${NC}"
+  fi
+
+  if tmux has-session -t "$sess_b" 2>/dev/null; then
+    tmux capture-pane -t "$sess_b" -p -S -500 > "$STATE_DIR/turn${turn_num}_trace_B.txt" 2>&1
+    local lines_b
+    lines_b=$(wc -l < "$STATE_DIR/turn${turn_num}_trace_B.txt" | tr -d ' ')
+    echo -e "  ${GREEN}ok${NC} Trajectory B trace: $lines_b lines -> data/turn${turn_num}_trace_B.txt"
+  else
+    echo -e "  ${YELLOW}Trajectory B session not found (${sess_b})${NC}"
+  fi
+
+  echo ""
+
+  # Quick scan for key events in traces
+  for side in A B; do
+    local trace_file="$STATE_DIR/turn${turn_num}_trace_${side}.txt"
+    if [ -f "$trace_file" ]; then
+      echo -e "  ${BOLD}Trajectory ${side} quick scan:${NC}"
+
+      local test_runs
+      test_runs=$(grep -ci 'pytest\|cargo test\|npm test\|go test\|mvn test\|PASSED\|FAILED\|test.*ok' "$trace_file" 2>/dev/null || echo "0")
+      echo -e "    Test-related lines: $test_runs"
+
+      local errors
+      errors=$(grep -ci 'error\|Error\|ERROR\|panic\|traceback' "$trace_file" 2>/dev/null || echo "0")
+      echo -e "    Error/panic lines: $errors"
+
+      local permission
+      permission=$(grep -ci 'Allow\|permission\|y/n\|approve' "$trace_file" 2>/dev/null || echo "0")
+      echo -e "    Permission prompts: $permission"
+
+      local git_ops
+      git_ops=$(grep -ci 'git commit\|git push\|git reset\|git checkout\|git stash' "$trace_file" 2>/dev/null || echo "0")
+      echo -e "    Git operations: $git_ops"
+
+      echo ""
+    fi
+  done
+}
+
+# ---------------------------------------------------------------------------
+# compare-diffs: Automated A-vs-B comparison with scope/similarity analysis
+# ---------------------------------------------------------------------------
+
+cmd_compare_diffs() {
+  local turn_num="${1:-1}"
+
+  local diff_a="$STATE_DIR/turn${turn_num}_diff_A.txt"
+  local diff_b="$STATE_DIR/turn${turn_num}_diff_B.txt"
+
+  if [ ! -f "$diff_a" ] || [ ! -f "$diff_b" ]; then
+    echo -e "  ${RED}Diff files not found for Turn $turn_num.${NC}"
+    echo -e "  ${DIM}Run: bash $0 capture-diffs $turn_num${NC}"
+    exit 1
+  fi
+
+  echo -e "${BOLD}COMPARE DIFFS -- Turn $turn_num${NC}"
+  echo -e "${YELLOW}============================================================${NC}"
+  echo ""
+
+  "$PYTHON" - "$diff_a" "$diff_b" "$turn_num" << 'PYEOF'
+import sys, re, os
+from collections import Counter
+
+diff_a_path = sys.argv[1]
+diff_b_path = sys.argv[2]
+turn = sys.argv[3]
+
+def extract_files(diff_text):
+    files = set()
+    for line in diff_text.split('\n'):
+        m = re.match(r'^[MADRC]\s+(.+)', line)
+        if m:
+            files.add(m.group(1).strip())
+        m2 = re.match(r'^diff --git a/(.+) b/', line)
+        if m2:
+            files.add(m2.group(1).strip())
+        m3 = re.match(r'^\+\+\+ b/(.+)', line)
+        if m3:
+            files.add(m3.group(1).strip())
+    files.discard('/dev/null')
+    return files
+
+def extract_hunks(diff_text):
+    hunks = []
+    current = []
+    for line in diff_text.split('\n'):
+        if line.startswith('diff --git'):
+            if current:
+                hunks.append('\n'.join(current))
+            current = [line]
+        else:
+            current.append(line)
+    if current:
+        hunks.append('\n'.join(current))
+    return hunks
+
+diff_a = open(diff_a_path).read()
+diff_b = open(diff_b_path).read()
+
+files_a = extract_files(diff_a)
+files_b = extract_files(diff_b)
+
+shared = files_a & files_b
+only_a = files_a - files_b
+only_b = files_b - files_a
+
+print(f"  1. FILE COMPARISON")
+print(f"     Trajectory A changed: {len(files_a)} files")
+print(f"     Trajectory B changed: {len(files_b)} files")
+print(f"     Shared (both changed): {len(shared)} files")
+if only_a:
+    print(f"     Only in A: {', '.join(sorted(only_a))}")
+if only_b:
+    print(f"     Only in B: {', '.join(sorted(only_b))}")
+print()
+
+# Scope deviation detection
+submodule_patterns = [
+    r'library/backtrace', r'library/stdarch', r'vendor/',
+    r'third_party/', r'\.gitmodules', r'node_modules/',
+    r'\.lock$', r'package-lock\.json', r'Cargo\.lock',
+]
+scope_deviations_a = set()
+scope_deviations_b = set()
+
+for f in files_a:
+    for pat in submodule_patterns:
+        if re.search(pat, f):
+            scope_deviations_a.add(f)
+for f in files_b:
+    for pat in submodule_patterns:
+        if re.search(pat, f):
+            scope_deviations_b.add(f)
+
+print(f"  2. SCOPE DEVIATION CHECK")
+if scope_deviations_a or scope_deviations_b:
+    if scope_deviations_a:
+        print(f"     [FLAG] Trajectory A has potentially out-of-scope files:")
+        for f in sorted(scope_deviations_a):
+            print(f"       - {f}")
+    if scope_deviations_b:
+        print(f"     [FLAG] Trajectory B has potentially out-of-scope files:")
+        for f in sorted(scope_deviations_b):
+            print(f"       - {f}")
+    print(f"     >> Mention these in feedback weaknesses if unrelated to the prompt.")
+else:
+    print(f"     No obvious scope deviations detected.")
+print()
+
+# Diff similarity (are A and B doing the same thing?)
+hunks_a = extract_hunks(diff_a)
+hunks_b = extract_hunks(diff_b)
+
+# Simple line-level similarity
+lines_a = set(line.strip() for line in diff_a.split('\n')
+              if line.startswith('+') or line.startswith('-'))
+lines_b = set(line.strip() for line in diff_b.split('\n')
+              if line.startswith('+') or line.startswith('-'))
+
+if lines_a and lines_b:
+    intersection = lines_a & lines_b
+    smaller = min(len(lines_a), len(lines_b))
+    similarity = len(intersection) / smaller if smaller > 0 else 0
+else:
+    similarity = 0
+
+print(f"  3. DIFF SIMILARITY")
+print(f"     Changed lines in A: {len(lines_a)}")
+print(f"     Changed lines in B: {len(lines_b)}")
+print(f"     Shared changed lines: {len(lines_a & lines_b) if lines_a and lines_b else 0}")
+print(f"     Similarity: {similarity:.0%}")
+
+if similarity > 0.85:
+    print(f"     [WARNING] Diffs are near-identical ({similarity:.0%}).")
+    print(f"     >> Both models produced very similar output.")
+    print(f"     >> You MUST lean towards one model based on trace behavior.")
+    print(f"     >> Do NOT default to A4/B4 just because output is similar.")
+elif similarity > 0.5:
+    print(f"     [NOTE] Moderate overlap. Check if core approach is same.")
+else:
+    print(f"     Diffs are substantially different.")
+print()
+
+# Size analysis
+size_a = len(diff_a)
+size_b = len(diff_b)
+print(f"  4. DIFF SIZE")
+print(f"     Trajectory A: {size_a:,} bytes ({len(diff_a.splitlines())} lines)")
+print(f"     Trajectory B: {size_b:,} bytes ({len(diff_b.splitlines())} lines)")
+if size_a > 50000 or size_b > 50000:
+    print(f"     [WARNING] Large diff detected. Read COMPLETELY before writing feedback.")
+print()
+
+# Save comparison report
+report_path = os.path.join(os.path.dirname(diff_a_path), f"turn{turn}_comparison.txt")
+with open(report_path, 'w') as f:
+    f.write(f"Turn {turn} Comparison Report\n")
+    f.write(f"{'='*60}\n")
+    f.write(f"Files A: {len(files_a)} | Files B: {len(files_b)} | Shared: {len(shared)}\n")
+    f.write(f"Only A: {', '.join(sorted(only_a)) or 'none'}\n")
+    f.write(f"Only B: {', '.join(sorted(only_b)) or 'none'}\n")
+    f.write(f"Similarity: {similarity:.0%}\n")
+    f.write(f"Scope deviations A: {', '.join(sorted(scope_deviations_a)) or 'none'}\n")
+    f.write(f"Scope deviations B: {', '.join(sorted(scope_deviations_b)) or 'none'}\n")
+
+print(f"  Report saved: data/turn{turn}_comparison.txt")
+print()
+PYEOF
+
+  echo ""
+}
+
+# ---------------------------------------------------------------------------
+# open-worktrees: Open A/B worktree directories in VS Code for visual review
+# ---------------------------------------------------------------------------
+
+cmd_open_worktrees() {
+  local worktree_dir
+  worktree_dir=$(find_worktree_dir)
+
+  if [ -z "$worktree_dir" ]; then
+    echo -e "  ${RED}Could not find worktree directory.${NC}"
+    echo -e "  ${DIM}Make sure HFI has been launched and trajectories have run.${NC}"
+    exit 1
+  fi
+
+  echo -e "${BOLD}OPEN WORKTREES IN VS CODE${NC}"
+  echo -e "${YELLOW}------------------------------------------------------------${NC}"
+
+  if command -v code >/dev/null 2>&1; then
+    echo -e "  Opening Trajectory A: ${CYAN}$worktree_dir/A${NC}"
+    code "$worktree_dir/A" 2>/dev/null &
+    sleep 1
+    echo -e "  Opening Trajectory B: ${CYAN}$worktree_dir/B${NC}"
+    code "$worktree_dir/B" 2>/dev/null &
+    echo ""
+    echo -e "  ${GREEN}ok${NC} Both worktrees opened in VS Code"
+    echo -e "  ${DIM}Use VS Code's Source Control panel to review diffs visually.${NC}"
+  else
+    echo -e "  ${YELLOW}VS Code 'code' command not found.${NC}"
+    echo -e "  ${DIM}Install: VS Code -> Cmd+Shift+P -> 'Shell Command: Install code in PATH'${NC}"
+    echo ""
+    echo -e "  Manual paths:"
+    echo -e "    Trajectory A: ${BOLD}$worktree_dir/A${NC}"
+    echo -e "    Trajectory B: ${BOLD}$worktree_dir/B${NC}"
+  fi
+  echo ""
+}
+
+# ---------------------------------------------------------------------------
+# audit-log: Append structured entries to the audit trail
+# ---------------------------------------------------------------------------
+
+AUDIT_LOG="$STATE_DIR/audit_log.jsonl"
+
+audit_log() {
+  local action="$1"
+  local detail="${2:-}"
+  mkdir -p "$STATE_DIR"
+  "$PYTHON" -c "
+import json, datetime, sys
+entry = {
+    'timestamp': datetime.datetime.now().isoformat(),
+    'action': '$action',
+    'detail': sys.stdin.read().strip() if not '$detail' else '$detail'
+}
+with open('$AUDIT_LOG', 'a') as f:
+    f.write(json.dumps(entry) + '\n')
+" <<< "${detail}"
+}
+
+cmd_audit_show() {
+  echo -e "${BOLD}AUDIT LOG${NC}"
+  echo -e "${YELLOW}------------------------------------------------------------${NC}"
+
+  if [ ! -f "$AUDIT_LOG" ]; then
+    echo -e "  ${DIM}No audit log yet. Actions are logged automatically.${NC}"
+    return
+  fi
+
+  "$PYTHON" -c "
+import json, pathlib
+entries = [json.loads(l) for l in pathlib.Path('$AUDIT_LOG').read_text().splitlines() if l.strip()]
+for e in entries:
+    ts = e.get('timestamp', '?')[:19]
+    action = e.get('action', '?')
+    detail = e.get('detail', '')
+    if len(detail) > 100:
+        detail = detail[:100] + '...'
+    print(f'  [{ts}] {action}: {detail}')
+"
+  echo ""
+}
+
+# ---------------------------------------------------------------------------
+# verify-winner-sync: Check that winner's files were synced to main repo
+# ---------------------------------------------------------------------------
+
+cmd_verify_sync() {
+  local repo_path
+  repo_path=$(load_state repo_path)
+  local worktree_dir
+  worktree_dir=$(find_worktree_dir)
+
+  if [ -z "$repo_path" ] || [ -z "$worktree_dir" ]; then
+    echo -e "  ${RED}Repo or worktree path not found.${NC}"
+    exit 1
+  fi
+
+  echo -e "${BOLD}VERIFY WINNER SYNC${NC}"
+  echo -e "${YELLOW}------------------------------------------------------------${NC}"
+
+  local main_hash a_hash b_hash
+  main_hash=$(cd "$repo_path" && git rev-parse HEAD 2>/dev/null || echo "none")
+
+  if [ -d "$worktree_dir/A/.git" ] || [ -f "$worktree_dir/A/.git" ]; then
+    a_hash=$(cd "$worktree_dir/A" && git rev-parse HEAD 2>/dev/null || echo "none")
+  else
+    a_hash="none"
+  fi
+
+  if [ -d "$worktree_dir/B/.git" ] || [ -f "$worktree_dir/B/.git" ]; then
+    b_hash=$(cd "$worktree_dir/B" && git rev-parse HEAD 2>/dev/null || echo "none")
+  else
+    b_hash="none"
+  fi
+
+  echo -e "  Main repo HEAD:    $main_hash"
+  echo -e "  Trajectory A HEAD: $a_hash"
+  echo -e "  Trajectory B HEAD: $b_hash"
+  echo ""
+
+  if [ "$main_hash" = "$a_hash" ]; then
+    echo -e "  ${GREEN}Main repo matches Trajectory A${NC} -- winner A synced correctly"
+  elif [ "$main_hash" = "$b_hash" ]; then
+    echo -e "  ${GREEN}Main repo matches Trajectory B${NC} -- winner B synced correctly"
+  else
+    echo -e "  ${YELLOW}Main repo HEAD does not match either trajectory.${NC}"
+    echo -e "  ${DIM}This may be normal if HFI syncs files without committing,${NC}"
+    echo -e "  ${DIM}or if the sync hasnt happened yet.${NC}"
+
+    # Check file-level differences
+    local main_files a_files b_files
+    main_files=$(cd "$repo_path" && git diff --name-only HEAD 2>/dev/null | sort)
+    echo ""
+    echo -e "  ${BOLD}Uncommitted changes in main repo:${NC}"
+    if [ -n "$main_files" ]; then
+      echo "$main_files" | sed 's/^/    /'
+    else
+      echo -e "    ${DIM}(none)${NC}"
+    fi
+  fi
+  echo ""
+}
+
+# ---------------------------------------------------------------------------
 # select-winner: Send winner feedback via tmux
 # ---------------------------------------------------------------------------
 
@@ -1367,15 +1784,28 @@ tmux_set_scale() {
 #
 # Feedback file format (delimiter: lines starting with ::SECTION::):
 #
+# V3 (April 2026) uses 7 text fields per turn:
+#   1. Senior expectations
+#   2. Model A -- Solution Quality (correctness, code quality, edge cases, tests)
+#   3. Model A -- Agency (risky actions, judgment, clarification seeking)
+#   4. Model A -- Communication (clarity, honesty, self-reporting, docs)
+#   5. Model B -- Solution Quality
+#   6. Model B -- Agency
+#   7. Model B -- Communication
+#
 #   ::SENIOR_EXPECTATIONS::
 #   text here...
-#   ::MODEL_A_STRENGTHS::
+#   ::MODEL_A_SOLUTION_QUALITY::
 #   text here...
-#   ::MODEL_A_WEAKNESSES::
+#   ::MODEL_A_AGENCY::
 #   text here...
-#   ::MODEL_B_STRENGTHS::
+#   ::MODEL_A_COMMUNICATION::
 #   text here...
-#   ::MODEL_B_WEAKNESSES::
+#   ::MODEL_B_SOLUTION_QUALITY::
+#   text here...
+#   ::MODEL_B_AGENCY::
+#   text here...
+#   ::MODEL_B_COMMUNICATION::
 #   text here...
 #   ::RATINGS::
 #   6.1=B1
@@ -1426,30 +1856,56 @@ cmd_fill_feedback() {
   echo -e "  Session: ${BOLD}$launcher_session${NC}"
   echo ""
 
+  # Save a timestamped backup of the feedback file for audit trail
+  local backup_name
+  backup_name="feedback_$(date +%Y%m%d_%H%M%S)_$(basename "$feedback_file")"
+  cp "$feedback_file" "$STATE_DIR/$backup_name" 2>/dev/null
+  audit_log "fill-feedback-start" "file=$feedback_file backup=$backup_name session=$launcher_session"
+
+  # Capture screen BEFORE filling to verify we're on the feedback form
+  local pre_screen
+  pre_screen=$(tmux capture-pane -t "$launcher_session" -p 2>/dev/null || echo "")
+  if ! echo "$pre_screen" | grep -qi "senior engineer\|expectations\|feedback\|model A\|solution quality\|agency\|communication" 2>/dev/null; then
+    echo -e "  ${YELLOW}WARNING: Feedback form may not be active on screen.${NC}"
+    echo -e "  ${DIM}Screen content does not match expected form fields.${NC}"
+    echo -e "  ${DIM}Check: tmux attach -t $launcher_session${NC}"
+    echo ""
+    echo -e "  ${BOLD}Continue anyway? (y/n)${NC}"
+    read -r confirm
+    if [ "$confirm" != "y" ]; then
+      echo -e "  ${RED}Aborted. Attach to the session and verify the form is showing.${NC}"
+      return 1
+    fi
+  fi
+
   local current_section=""
   local section_text=""
   local key_axis_text=""
   local justification_text=""
   local action="continue"
   local senior_text=""
-  local a_strengths=""
-  local a_weaknesses=""
-  local b_strengths=""
-  local b_weaknesses=""
+  local a_solution_quality=""
+  local a_agency=""
+  local a_communication=""
+  local b_solution_quality=""
+  local b_agency=""
+  local b_communication=""
   local r_6_1="A4" r_6_2="A4" r_6_3="A4" r_6_4="A4" r_6_5="A4"
   local r_6_6="A4" r_6_7="A4" r_6_8="A4" r_6_9="A4" r_6_10="A4"
   local r_6_11="A4" r_overall="A4"
 
   _save_section() {
     case "$1" in
-      SENIOR_EXPECTATIONS) senior_text="$2" ;;
-      MODEL_A_STRENGTHS)   a_strengths="$2" ;;
-      MODEL_A_WEAKNESSES)  a_weaknesses="$2" ;;
-      MODEL_B_STRENGTHS)   b_strengths="$2" ;;
-      MODEL_B_WEAKNESSES)  b_weaknesses="$2" ;;
-      KEY_AXIS)            key_axis_text="$2" ;;
-      JUSTIFICATION)       justification_text="$2" ;;
-      ACTION)              action="$(echo "$2" | tr -d '[:space:]')" ;;
+      SENIOR_EXPECTATIONS)      senior_text="$2" ;;
+      MODEL_A_SOLUTION_QUALITY) a_solution_quality="$2" ;;
+      MODEL_A_AGENCY)           a_agency="$2" ;;
+      MODEL_A_COMMUNICATION)    a_communication="$2" ;;
+      MODEL_B_SOLUTION_QUALITY) b_solution_quality="$2" ;;
+      MODEL_B_AGENCY)           b_agency="$2" ;;
+      MODEL_B_COMMUNICATION)    b_communication="$2" ;;
+      KEY_AXIS)                 key_axis_text="$2" ;;
+      JUSTIFICATION)            justification_text="$2" ;;
+      ACTION)                   action="$(echo "$2" | tr -d '[:space:]')" ;;
     esac
   }
 
@@ -1489,32 +1945,42 @@ cmd_fill_feedback() {
   local target="$launcher_session"
 
   # Field 1: Senior expectations
-  echo -e "  [1/7] Filling: Senior expectations..."
+  echo -e "  [1/9] Filling: Senior expectations..."
   tmux_send_text "$target" "$senior_text"
   tmux send-keys -t "$target" Tab; sleep 0.5
 
-  # Field 2: Model A strengths
-  echo -e "  [2/7] Filling: Model A strengths..."
-  tmux_send_text "$target" "$a_strengths"
+  # Field 2: Model A -- Solution Quality
+  echo -e "  [2/9] Filling: Model A -- Solution Quality..."
+  tmux_send_text "$target" "$a_solution_quality"
   tmux send-keys -t "$target" Tab; sleep 0.5
 
-  # Field 3: Model A weaknesses
-  echo -e "  [3/7] Filling: Model A weaknesses..."
-  tmux_send_text "$target" "$a_weaknesses"
+  # Field 3: Model A -- Agency
+  echo -e "  [3/9] Filling: Model A -- Agency..."
+  tmux_send_text "$target" "$a_agency"
   tmux send-keys -t "$target" Tab; sleep 0.5
 
-  # Field 4: Model B strengths
-  echo -e "  [4/7] Filling: Model B strengths..."
-  tmux_send_text "$target" "$b_strengths"
+  # Field 4: Model A -- Communication
+  echo -e "  [4/9] Filling: Model A -- Communication..."
+  tmux_send_text "$target" "$a_communication"
   tmux send-keys -t "$target" Tab; sleep 0.5
 
-  # Field 5: Model B weaknesses
-  echo -e "  [5/7] Filling: Model B weaknesses..."
-  tmux_send_text "$target" "$b_weaknesses"
+  # Field 5: Model B -- Solution Quality
+  echo -e "  [5/9] Filling: Model B -- Solution Quality..."
+  tmux_send_text "$target" "$b_solution_quality"
+  tmux send-keys -t "$target" Tab; sleep 0.5
+
+  # Field 6: Model B -- Agency
+  echo -e "  [6/9] Filling: Model B -- Agency..."
+  tmux_send_text "$target" "$b_agency"
+  tmux send-keys -t "$target" Tab; sleep 0.5
+
+  # Field 7: Model B -- Communication
+  echo -e "  [7/9] Filling: Model B -- Communication..."
+  tmux_send_text "$target" "$b_communication"
   tmux send-keys -t "$target" Tab; sleep 0.5
 
   # Scales 6.1 through 6.11
-  echo -e "  [6/7] Setting ratings (6.1-6.11 + overall)..."
+  echo -e "  [8/9] Setting ratings (6.1-6.11 + overall)..."
   for r_var in r_6_1 r_6_2 r_6_3 r_6_4 r_6_5 r_6_6 r_6_7 r_6_8 r_6_9 r_6_10 r_6_11; do
     local r="${!r_var}"
     tmux_set_scale "$target" "$r"
@@ -1534,7 +2000,7 @@ cmd_fill_feedback() {
   tmux send-keys -t "$target" Tab; sleep 0.5
 
   # Submit
-  echo -e "  [7/7] Submitting feedback..."
+  echo -e "  [9/9] Submitting feedback..."
   tmux send-keys -t "$target" Enter
 
   # Wait for submission with retry (uploads can take 30-60s)
@@ -1569,7 +2035,7 @@ cmd_fill_feedback() {
     echo ""
     echo -e "  ${BOLD}Why this happens:${NC}"
     echo -e "  1. Large diffs from trajectory changes exceed upload timeout"
-    echo -e "  2. Context overflow from not exiting HFI between turns"
+    echo -e "  2. Context overflow from accumulated trajectory context"
     echo -e "  3. Network issues between your machine and Anthropic servers"
     echo ""
 
@@ -1703,7 +2169,7 @@ cmd_fill_feedback() {
         echo -e "  ${BOLD}Filling post-thread survey...${NC}"
 
         # Fill the Comments field
-        local survey_text="Multi-turn task completed across 3 turns. Both trajectories produced working implementations with incremental improvements each turn. Task execution followed standard workflow with exit and relaunch between turns"
+        local survey_text="Multi-turn task completed across 3 turns. Both trajectories produced working implementations with incremental improvements each turn. Task execution followed standard multi-turn workflow"
         tmux_send_text "$target" "$survey_text"
         tmux send-keys -t "$target" Tab; sleep 0.5
 
@@ -1722,6 +2188,12 @@ cmd_fill_feedback() {
     fi
   fi
 
+  # Save post-submission screen capture for audit
+  local post_screen_final
+  post_screen_final=$(tmux capture-pane -t "$target" -p 2>/dev/null || echo "")
+  echo "$post_screen_final" > "$STATE_DIR/feedback_screen_$(date +%Y%m%d_%H%M%S).txt" 2>/dev/null
+  audit_log "fill-feedback-complete" "action=$action screen_saved=true"
+
   echo ""
   echo -e "  ${GREEN}ok${NC} Feedback form completed"
   echo ""
@@ -1729,6 +2201,9 @@ cmd_fill_feedback() {
 
 # ---------------------------------------------------------------------------
 # next-turn: Kill launcher, relaunch via tmux new-session, /clear
+# NOTE: Exit/relaunch between turns is NOT required. HFI supports
+# continuous multi-turn within one session. Only use next-turn if
+# the session is stuck, context-limited, or you need a fresh start.
 # ---------------------------------------------------------------------------
 
 cmd_next_turn() {
@@ -1749,7 +2224,7 @@ cmd_next_turn() {
 
   echo -e "${BOLD}NEXT TURN (Turn $current_turn -> Turn $next_turn) -- Exit & Relaunch CLI${NC}"
   echo -e "${YELLOW}------------------------------------------------------------${NC}"
-  echo -e "  ${DIM}Per Marlin V3 docs: must exit and relaunch between turns${NC}"
+  echo -e "  ${DIM}Use only when session is stuck, context-limited, or needs a fresh start.${NC}"
   echo -e "  ${DIM}to maintain stability and reset model context.${NC}"
   echo -e "  ${RED}CRITICAL: Do NOT run git commit between turns.${NC}"
   echo ""
@@ -1951,7 +2426,21 @@ cmd_full() {
   local repo_path
   repo_path=$(load_state repo_path)
 
-  # Step 2: Launch HFI (must come BEFORE claude-md)
+  # Step 2: Generate CLAUDE.md (BEFORE launch so both trajectories see it)
+  cmd_claude_md "$repo_path"
+
+  echo -e "${YELLOW}════════════════════════════════════════════════════════════${NC}"
+  echo -e "  ${BOLD}[YOUR TURN] Fill in the [FILL IN] sections in CLAUDE.md.${NC}"
+  echo -e "  Edit: ${repo_path}/CLAUDE.md"
+  echo ""
+  echo -e "  ${RED}Do NOT use claude-hfi to generate CLAUDE.md content.${NC}"
+  echo -e "  Press Enter when done editing."
+  echo -e "${YELLOW}════════════════════════════════════════════════════════════${NC}"
+  read -r
+
+  save_task_step "CLAUDE_MD_DONE"
+
+  # Step 3: Launch HFI (AFTER CLAUDE.md so both worktrees see it automatically)
   cmd_launch "$repo_path"
 
   echo -e "${YELLOW}════════════════════════════════════════════════════════════${NC}"
@@ -1964,23 +2453,7 @@ cmd_full() {
 
   save_task_step "LAUNCHED"
 
-  # Step 3: Generate CLAUDE.md (AFTER launch, per Marlin V3 docs)
-  cmd_claude_md "$repo_path"
-
-  echo -e "${YELLOW}════════════════════════════════════════════════════════════${NC}"
-  echo -e "  ${BOLD}[YOUR TURN] Fill in the [FILL IN] sections in CLAUDE.md.${NC}"
-  echo -e "  Edit: ${repo_path}/CLAUDE.md"
-  echo ""
-  echo -e "  ${RED}Do NOT use claude-hfi to generate CLAUDE.md content.${NC}"
-  echo -e "  Press Enter when done editing."
-  echo -e "${YELLOW}════════════════════════════════════════════════════════════${NC}"
-  read -r
-
-  # Step 4: Copy to worktrees
-  cmd_copy_claude_md "$repo_path"
-  save_task_step "CLAUDE_MD_DONE"
-
-  # Step 5: Inject + monitor
+  # Step 4: Inject + monitor
   if [ -n "$prompt_file" ] && [ -f "$prompt_file" ]; then
     echo -e "  ${DIM}Waiting 5 seconds for HFI to initialize...${NC}"
     sleep 5
@@ -2449,7 +2922,7 @@ cmd_diagnose() {
         echo -e "  ${DIM}WHAT HAPPENED: The feedback upload to Anthropics servers failed.${NC}"
         echo -e "  ${DIM}WHAT YOU SAW:  Either a 'timeout' message, a frozen screen,${NC}"
         echo -e "  ${DIM}               or HFI said 'submitted' but the file is empty/missing.${NC}"
-        echo -e "  ${DIM}WHY:           Most likely you didnt exit HFI between turns, causing${NC}"
+        echo -e "  ${DIM}WHY:           Context overflow from accumulated trajectory context, causing${NC}"
         echo -e "  ${DIM}               context overflow and large corrupted diffs that timeout.${NC}"
         echo -e "  ${CYAN}FIX:           bash $0 retry-turn $turn_num${NC}"
         echo ""
@@ -2605,6 +3078,7 @@ cmd_retry_turn() {
 
 case "$COMMAND" in
   setup)
+    audit_log "setup" "tarball: ${1:-}"
     cmd_setup "$@"
     ;;
   claude-md|claudemd)
@@ -2614,25 +3088,42 @@ case "$COMMAND" in
     cmd_copy_claude_md "$@"
     ;;
   launch)
+    audit_log "launch" "repo: ${1:-}"
     cmd_launch "$@"
     ;;
   set-session)
     cmd_set_session "$@"
     ;;
   inject)
+    audit_log "inject" "prompt: ${1:-}"
     cmd_inject "$@"
     ;;
   monitor|watch)
+    audit_log "monitor" "started"
     cmd_monitor
     ;;
   capture-diffs|diffs)
+    audit_log "capture-diffs" "turn: ${1:-auto}"
     cmd_capture_diffs "$@"
+    ;;
+  capture-traces|traces)
+    audit_log "capture-traces" "turn: ${1:-1}"
+    cmd_capture_traces "$@"
+    ;;
+  compare-diffs|compare)
+    audit_log "compare-diffs" "turn: ${1:-1}"
+    cmd_compare_diffs "$@"
+    ;;
+  open-worktrees|vscode)
+    cmd_open_worktrees
     ;;
   select-winner|winner)
     cmd_select_winner "$@"
     ;;
   fill-feedback|feedback)
+    audit_log "fill-feedback" "file: ${1:-}"
     cmd_fill_feedback "$@"
+    audit_log "fill-feedback-done" "submitted"
     ;;
   next-turn|nextturn)
     cmd_next_turn
@@ -2658,29 +3149,39 @@ case "$COMMAND" in
   retry-turn|retry)
     cmd_retry_turn "$@"
     ;;
+  verify-sync|sync)
+    cmd_verify_sync
+    ;;
+  audit|log)
+    cmd_audit_show
+    ;;
   *)
     echo "Usage: $0 <command> [args]"
     echo ""
     echo -e "${BOLD}Phase 3 -- Environment Setup:${NC}"
     echo "  setup <tarball>          Unpack tarball, git init, install deps, run tests"
+    echo "  claude-md <repo-path>    Generate CLAUDE.md template (BEFORE launch)"
     echo "  launch <repo-path>       Copy CLI binary and start claude-hfi --tmux"
-    echo "  claude-md <repo-path>    Generate CLAUDE.md template (AFTER launch)"
-    echo "  copy-claude-md [repo]    Copy CLAUDE.md to both A/B worktree caches"
+    echo "  copy-claude-md [repo]    Copy CLAUDE.md to worktree caches (only if created after launch)"
     echo ""
     echo -e "${BOLD}Phase 4 -- Task Execution:${NC}"
     echo "  set-session <id>         Manually set the tmux session ID"
     echo "  inject <prompt-file>     Paste prompt into the control session"
     echo "  monitor                  Watch trajectories until completion"
     echo ""
-    echo -e "${BOLD}Multi-Turn Automation:${NC}"
+    echo -e "${BOLD}Review & Analysis:${NC}"
     echo "  capture-diffs [turn#]    Save A/B diffs from worktrees to data/ files"
+    echo "  capture-traces [turn#]   Save trajectory tmux output for trace review"
+    echo "  compare-diffs [turn#]    Automated A-vs-B: scope check, similarity, file comparison"
+    echo "  open-worktrees           Open A/B worktrees in VS Code for visual review"
+    echo "  verify-sync              Check that winner's files were synced to main repo"
+    echo ""
+    echo -e "${BOLD}Feedback:${NC}"
     echo "  select-winner <A|B|tie>  Print feedback guidance (manual entry)"
     echo "  fill-feedback <file>     Fill HFI feedback form from structured file"
-    echo "  next-turn                Kill session, relaunch --continue, /clear"
-    echo "  launch-hfi <repo> [--continue]  Launch HFI via tmux (proper TTY)"
     echo ""
     echo -e "${BOLD}All-in-one:${NC}"
-    echo "  full <tarball> <prompt>  Run entire Phase 3-4 pipeline"
+    echo "  full <tarball> <prompt>  Run entire Phase 3-4 pipeline (correct order)"
     echo ""
     echo -e "${BOLD}Quality:${NC}"
     echo "  pre-submit               Run full pre-submission quality checklist"
@@ -2688,10 +3189,13 @@ case "$COMMAND" in
     echo -e "${BOLD}Debugging:${NC}"
     echo "  diagnose [turns]         Full health check: sessions, files, uploads, errors"
     echo "  retry-turn <turn#>       Clear failed turn state and relaunch HFI to redo it"
+    echo "  audit                    Show audit log of all actions taken"
     echo ""
     echo -e "${BOLD}Utility:${NC}"
     echo "  status                   Show current Phase 3-4 state"
     echo "  task-status              Show task state machine progress"
+    echo "  next-turn                Kill session, relaunch --continue (only if needed)"
+    echo "  launch-hfi <repo> [--continue]  Launch HFI via tmux"
     echo ""
     echo -e "${DIM}For full automation (Turns 2-3 + evaluation), say${NC}"
     echo -e "${DIM}\"automate the rest\" in Cursor after Turn 1 finishes.${NC}"

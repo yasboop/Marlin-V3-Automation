@@ -13,7 +13,7 @@ Usage:
 Checks:
     1. Structural completeness (5 text fields, 11 axes, overall preference, turn record)
     2. Rating consistency (language vs magnitude, overall vs axis majority, prose vs rating)
-    3. Content quality (evaluative strengths, code references, justification depth)
+    3. Content quality (evaluative Solution Quality/Agency/Communication, code references, justification depth)
     4. Cross-turn validation (prompt similarity, scope drift)
     5. Anti-rejection (PR refs, role prompting, em-dashes, LLM words, turn count)
 """
@@ -81,35 +81,47 @@ EXPECTED_SECTIONS = {
         r'10\.1',
         r'ideal\s+baseline',
     ],
-    "model_a_strengths": [
-        r'model\s*a\s+strength',
+    "model_a_solution_quality": [
+        r'model\s*a.*solution\s+quality',
         r'10\.2',
-        r'trajectory\s*a\s+strength',
+        r'trajectory\s*a.*solution',
+        r'model\s*a\s+strength',
     ],
-    "model_a_weaknesses": [
-        r'model\s*a\s+weakness',
+    "model_a_agency": [
+        r'model\s*a.*agency',
         r'10\.3',
-        r'trajectory\s*a\s+weakness',
+        r'trajectory\s*a.*agency',
     ],
-    "model_b_strengths": [
-        r'model\s*b\s+strength',
+    "model_a_communication": [
+        r'model\s*a.*communication',
         r'10\.4',
-        r'trajectory\s*b\s+strength',
+        r'trajectory\s*a.*communication',
     ],
-    "model_b_weaknesses": [
-        r'model\s*b\s+weakness',
+    "model_b_solution_quality": [
+        r'model\s*b.*solution\s+quality',
         r'10\.5',
-        r'trajectory\s*b\s+weakness',
+        r'trajectory\s*b.*solution',
+        r'model\s*b\s+strength',
+    ],
+    "model_b_agency": [
+        r'model\s*b.*agency',
+        r'10\.6',
+        r'trajectory\s*b.*agency',
+    ],
+    "model_b_communication": [
+        r'model\s*b.*communication',
+        r'10\.7',
+        r'trajectory\s*b.*communication',
     ],
     "axis_ratings": [
         r'axis\s+rating',
-        r'10\.6',
+        r'10\.8',
         r'6\.1\s+through\s+6\.11',
         r'6\.1.*6\.11',
     ],
     "overall_preference": [
         r'overall\s+preference',
-        r'10\.7',
+        r'10\.9',
         r'overall\s+winner',
     ],
     "turn_prompts": [
@@ -361,7 +373,7 @@ def check_rating_consistency(eval_text: str) -> list[dict]:
 
 
 def check_content_quality(eval_text: str) -> list[dict]:
-    """Check strengths are evaluative, references are specific, justifications are deep."""
+    """Check Solution Quality/Agency/Communication are evaluative, references are specific, justifications are deep."""
     results = []
 
     na_matches = re.findall(r'\bN/?A\b', eval_text)
@@ -373,7 +385,9 @@ def check_content_quality(eval_text: str) -> list[dict]:
             "message": f"Found {len(na_matches)} instance(s) of 'N/A' in evaluation text. Never use N/A. Always provide a substantive answer even if a trajectory failed completely.",
         })
 
-    for section_key in ["model_a_strengths", "model_b_strengths"]:
+    for section_key in ["model_a_solution_quality", "model_b_solution_quality",
+                        "model_a_agency", "model_b_agency",
+                        "model_a_communication", "model_b_communication"]:
         content = find_section(eval_text, EXPECTED_SECTIONS[section_key])
         label = section_key.replace('_', ' ').title()
         if not content:
@@ -395,7 +409,8 @@ def check_content_quality(eval_text: str) -> list[dict]:
                 "message": "Contains evaluative language",
             })
 
-    for section_key in ["model_a_strengths", "model_a_weaknesses", "model_b_strengths", "model_b_weaknesses"]:
+    for section_key in ["model_a_solution_quality", "model_a_agency", "model_a_communication",
+                        "model_b_solution_quality", "model_b_agency", "model_b_communication"]:
         content = find_section(eval_text, EXPECTED_SECTIONS[section_key])
         label = section_key.replace('_', ' ').title()
         if not content:

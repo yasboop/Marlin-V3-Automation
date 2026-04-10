@@ -568,3 +568,6 @@ brew install tmux  # macOS
 8. **Tmux tip:** Use Ctrl+b then 1/2 to quickly switch between trajectories
 
 9. **Auto-attach shortcut:** For --tmux mode, use `$(claude-hfi --tmux)` to automatically enter the session
+
+
+

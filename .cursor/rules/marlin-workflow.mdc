@@ -28,3 +28,22 @@ decision on your own. Everything you need to know is in two files:
 Do not improvise, do not guess, do not rely on your own knowledge of
 Marlin or HITL processes. The playbook is the single source of truth.
 If something isnt covered in the playbook, ask the user.
+
+## Grounding Rule (Non-Negotiable)
+
+Before writing ANY feedback text, you MUST:
+1. Run `bash automation/hfi_orchestrator.sh capture-diffs <turn>` to save diffs
+2. Run `bash automation/hfi_orchestrator.sh capture-traces <turn>` to save traces
+3. Run `bash automation/hfi_orchestrator.sh compare-diffs <turn>` to get scope/similarity analysis
+4. Read the saved diff files COMPLETELY before making any claims
+5. For every claim about what a model did, find the exact diff hunk proving it
+6. Before claiming X is unique to one model, search the other model's diff for X
+7. Never cite test files, line numbers, or compile errors without verifying them in the diff/trace
+
+These rules exist because grounding failures caused a task rejection.
+See the "Grounding Rules" section in `automation/playbook.md`.
+
+## Process Rule
+
+Always use the orchestrator commands. Never bypass them with raw tmux commands.
+The orchestrator saves audit logs, creates backups, and enforces step ordering.

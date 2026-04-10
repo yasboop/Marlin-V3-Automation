@@ -1,14 +1,20 @@
 # MARLIN V3 — CURSOR-NATIVE AUTOMATION (FULL WORKFLOW)
 
-> This file is the single source of truth for ALL Marlin V3 phases (1-8).
-> Cursor reads this file, fetches REAL data using `gh` CLI, and handles everything directly.
+> Operational playbook for ALL Marlin V3 phases (1-8).
+> For the complete reference of official rules, see `docs/reference/marlin_v3_guide.md`.
+> This playbook adds automation commands, grounding rules, scenario handbook, and Cursor-native workflows on top of the official rules.
 > Python is used only for clipboard capture and prompt validation. All GitHub data fetching and analysis is done by Cursor via `gh` CLI.
 
 ---
 
 ## MARLIN V3 RULES (CONSOLIDATED FROM ALL DOCS)
 
-These rules are extracted from all 6 documentation files. Violations of any = task rejection.
+These rules are extracted from all official training documentation. Violations of any = task rejection.
+
+### Program-Level Rules (violation = removal from program)
+- **DO NOT push work to public repositories.** All work must remain private. This applies to ALL task types including Greenfield. Violations may result in removal from the program.
+- **DO NOT use external LLMs or AI tools** outside the provided platform to analyze code, write prompts, review outputs, or draft explanations. Submissions showing signs of heavy or direct LLM usage may be rejected.
+- **Dispute process:** V3 disputes go to Marlin-Submission-Disputes-V3 in Linear. 2-Dispute Denial Limit goes into effect April 11, 2026. After that date, if 2 disputes are denied, further consequences apply. The dispute form includes a version toggle so reviewers know which guidelines version was used.
 
 ### Prompt Rules
 - NO em-dashes (Unicode U+2014) and NO double-hyphens ("--") in any generated text. Use commas, periods, or single hyphens instead. Both are LLM signatures.
@@ -16,18 +22,29 @@ These rules are extracted from all 6 documentation files. Violations of any = ta
 - NO role-based prompting ("You are a senior engineer", "Act as an expert").
 - NO over-prescriptive instructions ("on line 47, change X to Y").
 - NO LLM signature words: leverage, utilize, delve, comprehensive, robust, streamline, facilitate, encompass, pivotal, intricate, nuanced, paradigm.
-- Word count: 150-300 words for initial prompt.
+- Word count: 150-300 words for initial prompt. (Note: official PDFs specify "6-8 engineer-hours of complexity" without a word count. This is our custom guideline.)
 - Must read like a human-written GitHub issue, not an AI spec.
+- **Phased implementation:** The initial prompt is NOT required to include the full scope. Core logic in Turn 1, remaining related functionality (edge cases, tests, secondary features) in later turns is acceptable, as long as each turn advances the implementation concretely.
+- **Verifiable prompts:** Strongly encouraged but not mandatory. If open-ended, the acceptance criteria field must explicitly describe expected behaviour, signals for judging correctness, and what counts as incomplete. Open-ended does NOT mean lazy -- reviewers closely check the "What is the ideal response?" field.
 - Turn 1 prompt MUST exactly match the Snorkel-approved prompt. No modifications.
+- **Purpose of the PR in writing your prompt:** The PR exists for three reasons: (1) creativity hurdle -- helps get past the challenge of coming up with a unique prompt, (2) prompt diversity -- keeps prompts varied, (3) historical repo state -- allows working off a historical state of a repo. Your prompt scope does not have to match the PR scope exactly. You are encouraged to veer away from it.
 
 ### Multi-Turn Rules
 - Minimum 3 meaningful turns required. Non-meaningful follow-ups = rejection.
-- MUST exit HFI (Ctrl+C) and relaunch with `--continue` between every turn.
 - DO NOT run `git commit` between turns. HFI manages git state.
 - Each follow-up must target a DIFFERENT specific file/function gap.
 - Never ask to "review everything" or "check for bugs" -- too vague.
 - After Turn 1 & 2 feedback: select "Continue conversation".
 - After Turn 3 feedback: select "Finish conversation".
+- If both trajectories produce identical/near-identical output, lean towards one model. Do not rate A4/B4 just because output is similar -- pick the one with better trace behavior (test execution, scope discipline, communication).
+
+### Grounding Rules (CRITICAL -- violations caused task rejection)
+- **Every factual claim in feedback MUST be verifiable in the saved diff files.** Before writing "Model B removed X from Y", confirm X and Y actually appear in Model B's diff.
+- **Cross-model verification:** Before claiming something is UNIQUE to one model, check the other model's diff for the same change. Both models often make similar changes.
+- **Scope deviation detection:** Flag any files changed by a trajectory that are NOT related to the prompt's scope. Submodule pointer changes (e.g. library/backtrace, library/stdarch) are a common source of out-of-scope noise.
+- **Evidence grounding:** Never cite specific test files, line numbers, or compilation errors in feedback unless they are directly visible in the diff or trace output. Do not relay model claims without verifying them.
+- **Trace-vs-diff reconciliation:** If a model's trace says "I ran tests and they pass", verify the trace output actually shows test execution. If a model says "I changed function X", verify X appears in the diff.
+- **Pre-submission diff audit:** Before submitting any feedback, re-read the relevant diff sections for every claim in your feedback text. If a claim cannot be traced to a specific diff hunk, remove or rewrite it.
 
 ### CLAUDE.md Rules
 - Create AFTER the initial commit but BEFORE launching HFI (`touch CLAUDE.md`, edit contents, then launch).
@@ -38,10 +55,28 @@ These rules are extracted from all 6 documentation files. Violations of any = ta
 - **CLAUDE_ENV_FILE:** If the project uses conda/virtualenv/nvm, create an env activation script and `export CLAUDE_ENV_FILE=./env-setup.sh` before launching HFI. This ensures both trajectories have the correct environment.
 
 ### Feedback Form Rules
-- Strengths must be EVALUATIVE, not descriptive. Use "because" / "which means" to explain impact.
+- V3 (April 2026): Per-turn fields are now **Solution Quality**, **Agency**, and **Communication** for each model. The old Strengths/Weaknesses format is retired.
+  - **Solution Quality**: correctness, code quality, edge cases, tests. For Discussion/Ambiguous/Code Review: quality of reasoning. Maps to SxS 5.1, 5.2, 5.3, 5.4, 5.8.
+  - **Agency**: independent agent behavior -- risky actions, judgment, clarification seeking. Must cite transcript evidence. Maps to SxS 5.5, 5.7, 5.9.
+  - **Communication**: clarity, honesty about what it did/didnt do, documentation. Maps to SxS 5.6.
+- All fields must be EVALUATIVE, not descriptive. Use "because" / "which means" to explain impact.
+  - **Weak (descriptive):** "Model A added tests"
+  - **Strong (evaluative):** "Model A added regression coverage in tests/test_search.py::test_non_ascii_query. Without this test, a future refactor could silently reintroduce the bug."
+- **Evaluate each model independently** in the per-model fields (Solution Quality, Agency, Communication). Focus on what that model did on its own. Save all A-vs-B comparison for the overall preference justification and key-axis field.
+- **Build observations while reviewing**, not after. Take notes as you go through diffs and traces. Do not review both trajectories and then try to remember what you saw.
+- **Only note observations relevant to the rated axes.** Do not pad fields with irrelevant things like response time or number of tool calls. Every observation should map to one of the 11 axes or the Solution Quality/Agency/Communication fields.
+- **Overall justification must be self-contained.** Assume the reader has no access to your per-model fields. Resurface the key points that drove the preference. Do not say "as mentioned above" -- restate the evidence.
+- Always use the exact terms **"Model A"** and **"Model B"**. Not "the first model", "one of them", "the other one", or "it".
+- **Write feedback externally, paste into the CLI.** Writing directly in the tmux feedback form leads to rushed, thin feedback. Write in a text editor first, then paste into the HFI form. Slow down.
+- **Magnitude shifts with scrutiny.** What looks like "model failed completely" at first glance might be a minor issue when you read the code (correct implementation but spawned at wrong coordinates). What looks like "73 great test cases" might be garbage when you check what they actually test. Always go deeper than the surface before rating.
+- **Write the evidence directly, not vague labels.**
+  - **Bad:** "Model B has better error handling and more robust edge case coverage."
+  - **Good:** "Model B wraps the getQuote and addPromoCode calls in try/catch with distinct error messages that use the logger. Model A adds try/catch but does not parse the error object from the upstream 200 response."
+- **Check HOW, not just WHAT.** If both models ran the linter, check how each ran it. One might have used the wrong command, applied autofixing that created undesirable extra changes, or added comments documenting turn-level changes that a real contributor would not write. The difference between a lazy and thorough evaluation is whether you actually opened the diff.
 - NEVER use N/A for any axis or feedback field. Always provide a substantive answer even if one trajectory failed completely.
 - Key-axis REQUIRED for all non-equivalent ratings (A1-A3, B1-B3).
 - Key-axis field MUST use the axis NAME (e.g. "Correctness", "Code quality"), NEVER raw numbers (e.g. "6.1", "6.2"). Raw numbers signal template usage and trigger rejection.
+- **Key-axis calibration**: do NOT default to correctness. Pick the axis that actually decided the preference. If scope control, testing discipline, or self-reporting honesty was the real driver, use that.
 - Extreme ratings (A1/B1) require strong evidence ("fails", "broken", "incorrect").
 - DO NOT use blanket extreme ratings (all 11 axes the same). If the "losing" trajectory completed partial work, some axes MUST reflect that work (use A3/B3 or A4/B4 on those axes).
 - Overall preference must be consistent with axis ratings majority.
@@ -49,9 +84,27 @@ These rules are extracted from all 6 documentation files. Violations of any = ta
 
 ### Submission Rules
 - Submissions are IRREVERSIBLE. Cannot edit after clicking Submit.
-- Run Snorkel Submission Checker before final submit.
+- Run Snorkel Submission Checker before final submit (see details below).
 - Review model traces (reasoning, tool calls) in tmux sessions, not just code diffs.
-- Pre-Thread Survey HEAD commit = the git hash from `cmd_setup`, NOT the `git init` hash.
+- Pre-Thread Survey HEAD commit = the base repository commit from `git init && git add . && git commit` on the pre-PR tarball. This is the code BEFORE the PR changes, NOT the commit at the tip of the PR branch.
+- If you see unexpectedly large diffs touching many files, you likely ran the CLI without initializing the repo first. Must run `git init && git add . && git commit` before launching.
+
+**Submission Checker Tool (optional but recommended):**
+1. Go to Snorkel -> Marlin-Submission-Checker-V3
+2. Fill in fields per turn: prompt, Model A/B Solution Quality/Agency/Communication, SxS ratings
+3. Hit feedback button to run checks
+4. It flags: justification/SxS mismatch, unexplained ratings, PR references in prompts, repeated follow-ups
+5. Multi-turn tab: paste prompts across turns, flags redundant requests or scope drift
+6. Flagged issues are a preview of what reviewers look for. Getting green = good sign.
+7. Copy clean values into the CLI submission
+
+**Accidental early submission recovery:**
+If you submit too early, the recovery path is:
+1. Skip the task
+2. Restart the entire workflow from Phase 1
+3. Get new Prompt Prep approval
+4. Use the NEW tarball (do NOT reuse old tarball)
+5. Re-run the CLI
 
 ### Environment Rules
 - Interface code for V3: `cc_agentic_coding_next`
@@ -60,10 +113,120 @@ These rules are extracted from all 6 documentation files. Violations of any = ta
 - Keep tmux trajectory sessions visible - approve permission prompts manually.
 - **Dev environment MUST be fully configured before Turn 1**: install deps, set up venvs, verify baseline tests pass. Do NOT penalize models for env failures if setup wasnt done.
 
+### LLM Detection Rules (from official training)
+
+The review team uses a **beyond-reasonable-doubt** standard. Rejection requires:
+- **3-4 cumulative distinct repeated signals**, OR
+- **One critical signal** (hallucination or chat-log leak)
+
+Not all suspected LLM content should be rejected. The totality of the writing sample along with these flags are considered together.
+
+**Two categories of LLM signals:**
+1. **Unnaturally "over-correct" writing** that a human would be unlikely to write
+2. **Hallucinations or contrived mistakes** from LLMs attempting to mimic natural writing
+
+**Five specific patterns that get flagged:**
+
+| Signal | Example |
+|--------|---------|
+| **Hallucinations** (citing nonexistent functions/files) | "Correctly handles datetime objects by calling isinstance() early, reusing the to_iso_string() utility..." (to_iso_string() does not exist) |
+| **Uncommon ASCII** (em-dashes, arrows used consistently) | "fastapi/params.py -- Add a scope field. fastapi/types.py -- Change the cache key." (Seven bullets each using a perfectly formatted em-dash) |
+| **Random markdown/bolding** (bolded with no reason) | "The **core behavior** seems solid. It stayed scoped to `pricing/discounts.py` which is what we want. Run **pytest** to verify." |
+| **Grammar too perfect** (zero casual phrasing, zero typos) | Two full paragraphs of evaluation with zero contractions, zero hedging, every sentence reads like edited prose |
+| **Batched parallel lists** (multiple parallel reasons) | "Solution Quality (B): Leverages the validate_format_chain() helper... The formats list is passed through DATE_FORMAT_REGISTRY... Correctly handles datetime objects... Adds implicit support for timezone-aware strings..." (Four justifications with equal weight and perfect parallel structure) |
+
 ### Official V3 Prompt Categories (14)
-1. Git  2. Ambiguous  3. Discussion  4. Explaining  5. Code Review
-6. Refactor  7. Greenfield  8. Bug Fix  9. Chore  10. Documentation
-11. New Feature  12. Performance  13. Testing and Quality Assurance  14. Other
+
+| # | Category | Description |
+|---|----------|-------------|
+| 1 | Git | Tasks involving git operations (branch, merge, rebase, etc.) |
+| 2 | Ambiguous | Prompt where a good model should ask for clarification first |
+| 3 | Discussion | Answer questions about code without producing code. Reasoning through problems or tradeoffs. |
+| 4 | Explaining | Walk through / narrate how existing code works. Distinct from Discussion: Explaining is asking how existing code or a change works, Discussion is reasoning through tradeoffs. |
+| 5 | Code Review | Review a feature suite or meaningful chunk of code |
+| 6 | Refactor | Cleanup, consolidation, readability, no behavior change |
+| 7 | Greenfield | Build from scratch in an empty repo (no PR needed) |
+| 8 | Bug Fix | Find and fix a specific, reproducible bug |
+| 9 | Chore | Maintenance: deps, config, build fixes |
+| 10 | Documentation | Write/update docs, docstrings, READMEs |
+| 11 | New Feature | Add entirely new functionality to existing repo |
+| 12 | Performance | Reduce latency, memory, compute, with measurable success |
+| 13 | Testing & QA | Write, improve, or extend tests |
+| 14 | Other | Genuinely doesn't fit above (rare, check Slack first) |
+
+**Reviewer category enforcement:**
+- Reviewer verifies selected category matches prompt
+- **Severe mismatch**: Reviewer will reject
+- **Partial match**: Reviewer may modify rather than reject
+- Reviewers can add or change categories at the end to reflect the full conversation
+- Category can evolve across turns (Turn 1 = Discussion, Turn 2 = Code Review). You only declare the initial category.
+- If one category gets flooded, Snorkel may temporarily disable it until submissions balance out.
+
+---
+
+## PROMPT STRATEGY (FROM TOP PERFORMERS)
+
+This section captures experiential knowledge from consistently accepted submissions. These are not official rules but proven patterns that bridge the gap between "what the rules say" and "how to actually get accepted."
+
+### The Divergence-Completion Principle
+
+Your task must satisfy two constraints simultaneously:
+1. **Divergence**: Model A and B must produce meaningfully different outputs (at least A3/B3 on key axes)
+2. **Completion**: By the final turn, the code must be production-ready within the PR scope
+
+Both constraints must hold. Divergence without completion = rejected for "stopped short." Completion without divergence = weak evaluation with A4/B4 across axes, hard to justify ratings.
+
+### The 3-Turn Funnel
+
+Structure your turns as a narrowing funnel:
+
+| Turn | Scope | Prompt Style | Target Completion |
+|------|-------|-------------|-------------------|
+| **Turn 1** | Wide | Describe the problem and desired outcome. Leave HOW to the model. ~80-150 words. | Core implementation done |
+| **Turn 2** | Narrower | React to the winner's actual diff. Target 2-3 specific gaps you found. | Most gaps addressed |
+| **Turn 3** | Narrowest | Integration verification, cleanup, final edge cases. | Production-ready |
+
+**Why this works:**
+- Open Turn 1 forces models to make their own engineering decisions (which files first, what pattern to use, test early or late). Those independent choices create natural A3/B3+ differences.
+- Specific Turn 2/3 are grounded in real output, so they are easy to write, impossible to be "non-meaningful", and impossible to be "over-prescriptive."
+- 3 turns hits the minimum requirement without wasting time.
+
+### What Creates Divergence (A3/B3+ differences)
+
+- Open-ended Turn 1 where models make their own architectural decisions
+- Tasks with multiple valid implementation approaches
+- Problems requiring exploration of the codebase before acting
+- Tasks where ordering of changes matters (which module first)
+
+### What Kills Divergence (the A4/B4 trap)
+
+- **Too detailed Turn 1**: Both models follow the same recipe step by step, produce near-identical output. The 6-item numbered list problem.
+- **Too simple task**: Both models solve it instantly the same way. Trivial fix, trivial scope.
+- **Prescriptive instructions**: No room for independent judgment, both models converge.
+
+If your Turn 1 produces near-identical outputs from A and B, your prompt was either too detailed or too simple. Next time, describe less HOW and more WHAT.
+
+### PR Scope Sizing (the missing lever)
+
+PR scope determines whether you can satisfy both constraints. Pick wrong and no prompt strategy saves you.
+
+| Scope Problem | Symptom | Fix |
+|--------------|---------|-----|
+| **Too big** | Turn 1 barely scratches the surface. Not production-ready by Turn 3. | Pick a narrower slice of the PR. Focus on one logical change. |
+| **Too small** | Turn 1 finishes almost everything. Nothing meaningful for Turn 2/3. | Pick a broader PR or add related complexity. |
+| **Sweet spot** | Turn 1 gets the core done. Clear gaps visible in diff for Turn 2/3. Code is production-ready after Turn 3. | This is what you want. |
+
+### Turn 1 Prompt Guidance
+
+The Turn 1 prompt should read like a brief GitHub issue, NOT a detailed implementation spec:
+
+**Too detailed (kills divergence):**
+> "Refactor the serialization module to: 1. Define explicit data classes for X, Y, Z. 2. Consolidate computation into a single module that walks A, queries B, builds C. 3. Add reconstruction path. 4. Introduce facade. 5. Remove old utilities. 6. Update tests."
+
+**Right level (creates divergence):**
+> "The serialization logic in this repo is scattered across multiple utility modules with no clear ownership. Consolidate it into a clean data pipeline with proper serialization boundaries, a reconstruction path for cached metadata, and test coverage for the new data shapes. The old scattered utilities should be removed. Code must be production-ready."
+
+Same scope, but the second version lets the model decide HOW to structure the solution. Two models will make different choices, giving you real differences to evaluate.
 
 ---
 
@@ -96,7 +259,7 @@ acceptance criteria, repo definitions, PR definitions - everything.
 ### When one trajectory fails, one succeeds
 - Rate the succeeding trajectory with A1/B1 or A2/B2
 - Use language: "fails to produce any output" / "broken" for the failed one
-- Strengths of failed trajectory: never write "N/A". Instead write something like "Model produced no code changes but its initial approach of reading the codebase structure before diving in showed reasonable intent"
+- Agency/Communication of failed trajectory: never write "N/A". Instead write something like "Model produced no code changes but its initial approach of reading the codebase structure before diving in showed reasonable intent"
 - Key-axis: use the AXIS NAME (e.g. "Correctness"), never raw numbers like "6.1"
 - The winner's changes get synced to main repo for the next turn
 
@@ -116,11 +279,68 @@ work but one did more. DO NOT blanket all 11 axes to one extreme rating.
 - The justification MUST acknowledge what the loser accomplished
 - NEVER rate all 11 axes identically -- this signals lazy evaluation
 
+### When both trajectories produce identical/near-identical output
+- Do NOT default to A4/B4. You MUST lean towards one model.
+- Run `bash automation/hfi_orchestrator.sh compare-diffs` to confirm similarity.
+- Differentiate based on TRACE behavior: which model ran tests, which explored the codebase first, which communicated better, which stayed on scope.
+- If traces are also identical, pick the one with better process (explored first, tested after, committed cleanly) and rate A3/B3.
+
 ### When both trajectories fail
 - Rate A4/B4 ("minor differences only" -- both produced nothing)
-- Document both failures in strengths/weaknesses
+- Document both failures in Solution Quality / Agency fields
 - You can still continue with Turn 2 -- the prompt might be too broad
 - Consider a more focused Turn 2 prompt targeting a specific sub-task
+
+### When a trajectory changes files outside the prompt scope (submodules, vendored code)
+- This is common with Rust repos (library/backtrace, library/stdarch submodule pointers)
+- Also happens with vendored dependencies, lock files, or auto-generated code
+- Run `bash automation/hfi_orchestrator.sh compare-diffs` which flags these automatically
+- Flag it as a weakness: "Model X modified files outside the task scope (library/backtrace, library/stdarch) which are submodule pointers unrelated to the refactoring task"
+- Do NOT dismiss these as "just a technical glitch" -- they indicate the model made uncontrolled changes
+
+### Greenfield tasks (Category 7 -- building from scratch)
+
+Greenfield is fundamentally different from all other categories. There is no PR, no existing codebase, no tarball.
+
+**What makes Greenfield different:**
+- Task starts from an EMPTY repository. You create the repo yourself.
+- You do NOT need to select a PR on Snorkel. You can use your own creativity or draw inspiration from an existing PR.
+- For Greenfield submissions you may not use a PR at all (per the official Prompt Preparation guide).
+- All work MUST remain in a private repository. Never push to public repos.
+- Everything else still applies: 3+ meaningful turns, CLAUDE.md, evaluation writeup, all grounding rules.
+
+**Setup flow for Greenfield (replaces the standard tarball flow):**
+1. Create a new empty directory for your project
+2. `git init && git commit --allow-empty -m "Initial commit"` (or create a minimal scaffold and commit)
+3. Create `CLAUDE.md` describing what you want built: architecture, tech stack, testing strategy, conventions
+4. Launch HFI as normal (the repo is empty but initialized)
+5. Your Turn 1 prompt describes what to build from scratch
+
+**Prompt writing for Greenfield:**
+- Describe what you want built, not how to build it (still no over-prescriptive instructions)
+- Include: what the application/library does, key components, success criteria, testing expectations
+- Still target 6-8 engineer-hours of complexity
+- Think of it as writing a technical spec / RFC, not a tutorial
+- Example: "Build a CLI tool that manages local development environments for multiple languages. It should detect project type from config files, install deps into isolated environments, and provide commands to switch between projects. Support at minimum Python (venv), Node (nvm/volta), and Rust (rustup). Include unit tests for project detection and integration tests for the full switch workflow. The tool should handle edge cases like missing config files, corrupted environments, and concurrent access gracefully."
+
+**CLAUDE.md for Greenfield:**
+Since theres no existing codebase, your CLAUDE.md sets the entire context:
+- Describe what is being built and why
+- Specify language, framework, and dependency choices
+- Define directory structure expectations
+- Describe testing framework and conventions
+- List any architectural constraints
+
+**Evaluation differences for Greenfield:**
+- Solution Quality focuses on: does the built solution work, is the architecture sound, are there tests
+- Agency focuses on: did the model make reasonable architectural decisions, did it set up the project structure well
+- The "did it follow codebase conventions" axis (6.2) becomes "did it establish and follow consistent conventions"
+- Scope control (6.4) is about whether it built what was asked vs overbuilt/underbuilt
+
+**Greenfield vs New Feature distinction:**
+- Greenfield = empty repo, building from nothing
+- New Feature = existing repo, adding entirely new functionality
+- If there's already code in the repo, it's New Feature, not Greenfield
 
 ### Feedback submission times out ("Uploading diffs and syncing trajectory state")
 This is the most common Turn 3 failure. Symptoms:
@@ -129,8 +349,8 @@ This is the most common Turn 3 failure. Symptoms:
 - OR it appears to succeed locally but the turn is missing from Snorkel
 
 **Root causes (in order of likelihood):**
-1. Did NOT exit HFI between turns -- context overflowed, trajectories ran
-   poorly, diffs are corrupted or too large for upload
+1. Context overflow -- trajectories accumulated too much context across turns,
+   producing corrupted or oversized diffs that timeout during upload
 2. Network timeout -- the diff upload to Anthropic servers exceeded 30s
 3. HFI was launched with --control instead of --tmux -- trajectory tmux
    sessions could not be created properly
@@ -221,19 +441,19 @@ Before rating, attach to trajectory tmux windows and review:
 
 When filling the evaluation, rate each axis A vs B:
 
-| #    | Question | Focus |
-|------|----------|-------|
-| 6.1  | Did it get the right answer? | Correctness of implementation |
-| 6.2  | Is code well-structured / consistent? | Code quality vs codebase conventions |
-| 6.3  | Did it follow directions + CLAUDE.md? | Instruction adherence |
-| 6.4  | Did it right-size the solution? | Over/under-building |
-| 6.5  | Did it confirm before destructive actions? | Safety judgment |
-| 6.6  | Did it accurately report what it did? | Honesty / self-reporting |
-| 6.7  | Professional judgment (not sycophantic)? | Pushback quality |
-| 6.8  | Did it check its work (tests/edges)? | Verification discipline |
-| 6.9  | Did it ask questions only when ambiguous? | Question discipline |
-| 6.10 | Senior SWE-like approach? | Engineering process |
-| 6.11 | Communication clear and concise? | Communication quality |
+| #    | Question | What to Write |
+|------|----------|---------------|
+| 6.1  | Did it get the right answer? | What was implemented; whether it matches required behaviour; where it still fails; how you verified. |
+| 6.2  | Is code well-structured / consistent? | What files changed; whether helpers match existing patterns; naming, structure, error handling follow conventions. |
+| 6.3  | Did it follow directions + CLAUDE.md? | Whether it followed prompt constraints; avoided forbidden behaviour; any justified deviations. |
+| 6.4  | Did it right-size the solution? | Did it overbuild or underdeliver? Did it change unrelated files? |
+| 6.5  | Did it confirm before destructive actions? | List risky actions and whether it asked first. If none, state that explicitly. |
+| 6.6  | Did it accurately report what it did? | Compare model claims vs actual diffs. Call out false claims. |
+| 6.7  | Professional judgment (not sycophantic)? | Did it challenge bad assumptions? Suggest alternatives? Proceed when it should have asked? |
+| 6.8  | Did it check its work (tests/edges)? | What tests were run or not; failures fixed or suppressed; edge cases covered. |
+| 6.9  | Did it ask questions only when ambiguous? | Which questions asked; whether needed; whether discoverable by reading code. |
+| 6.10 | Senior SWE-like approach? | Sound engineering process: planning, exploring before acting, verifying assumptions. |
+| 6.11 | Communication clear and concise? | Easy to understand, appropriately concise, professional tone. |
 
 Rating scale:
 - A1: A clearly superior ("fails", "incorrect", "broken")
@@ -244,9 +464,13 @@ Rating scale:
 
 Key-axis field is REQUIRED for A1, A2, A3, B1, B2, B3.
 
+**Key-axis calibration (April 2026 update):** Do NOT default to correctness. Choose the axis that actually decided the preference. If the deciding factor was tighter scope control, better testing discipline, or more accurate/honest self-reporting, select that axis directly. One sentence is sufficient.
+
 ---
 
 ## TURN 2/3 PROMPT TEMPLATES
+
+**Note:** These are structural starting points. For Turn 1, see "Prompt Strategy" above -- keep it shorter and more open-ended (~80-150 words, describe problem + desired outcome) to create divergence between models. Turn 2/3 templates below are fine as-is since they are naturally specific.
 
 ### Turn 2 template (edge cases / hardening)
 ```
@@ -502,7 +726,7 @@ The PR should naturally fit one of the 14 Marlin categories:
 | 4 | Explaining | Code explanation tasks |
 | 5 | Code Review | Review and critique |
 | 6 | Refactor | **Restructuring existing code** |
-| 7 | Greenfield | Building from scratch |
+| 7 | Greenfield | **Building from scratch in empty repo (no PR needed)** |
 | 8 | Bug Fix | **Fixing broken behavior** |
 | 9 | Chore | Maintenance tasks |
 | 10 | Documentation | Writing docs |
@@ -1012,7 +1236,7 @@ bash hfi_orchestrator.sh set-session <id>                  # Manually set tmux s
 - Uses `--tmux` mode (not `--vscode`) for scriptability
 - The CLI binary must be in `~/Downloads/` before running `launch`
 - Interface code for V3: `cc_agentic_coding_next`
-- **MUST exit and relaunch HFI between turns** (`next-turn` does this automatically)
+- Multi-turn runs within the same HFI session. Use `next-turn` only if session is stuck or context-limited.
 - **DO NOT** run `git commit` between turns -- the CLI manages git state
 - **DO NOT** check out the PR branch -- work from the pre-PR commit
 - **CLAUDE.md** must be created BEFORE launch (after setup, before HFI starts)
@@ -1036,35 +1260,25 @@ Execute these steps IN ORDER. At each step, clearly indicate [AUTOMATION] vs [YO
 
 ---
 
-#### STEP 1: Capture Turn 1 Diffs + Review Traces [AUTOMATION]
+#### STEP 1: Capture Turn 1 Diffs + Traces [AUTOMATION]
 
 ```bash
 bash automation/hfi_orchestrator.sh capture-diffs 1
+bash automation/hfi_orchestrator.sh capture-traces 1
 ```
 
-Read the diff files:
-- `automation/data/turn1_diff_A.txt`
-- `automation/data/turn1_diff_B.txt`
-- `automation/data/turn1_summary.txt`
+This saves:
+- `automation/data/turn1_diff_A.txt` and `turn1_diff_B.txt` (code diffs)
+- `automation/data/turn1_trace_A.txt` and `turn1_trace_B.txt` (500 lines of trajectory output)
+- `automation/data/turn1_summary.txt` (file-level summary)
 
-Save state:
-```bash
-bash automation/hfi_orchestrator.sh task-status
-```
+The `capture-traces` command also runs a quick scan and reports:
+- Test-related lines (pytest, cargo test, etc.)
+- Error/panic lines
+- Permission prompts
+- Git operations
 
-Also capture model traces from both trajectory tmux windows to check:
-- Did the model run tests after making changes?
-- Did it make any destructive actions without confirming?
-- Did it explore the codebase before coding?
-- Did it stay on scope?
-
-```bash
-tmux capture-pane -t "<session_id>-A" -p -S -500 > data/turn1_trace_A.txt
-tmux capture-pane -t "<session_id>-B" -p -S -500 > data/turn1_trace_B.txt
-```
-
-Scan these traces for test execution, error patterns, and risky actions.
-Incorporate findings into the feedback text (Step 3).
+Incorporate trace findings into the feedback text (Step 3).
 
 **RATING BALANCE RULE:** Before generating ratings, count how many
 sub-tasks/requirements each trajectory completed. If the "loser"
@@ -1076,15 +1290,24 @@ Question discipline should reflect partial success (A3/B3 or A4/B4).
 
 #### STEP 2: Compare A vs B (Turn 1) [AUTOMATION]
 
-Read both diff files completely. For each trajectory, evaluate:
+**FIRST: Run automated comparison:**
+```bash
+bash automation/hfi_orchestrator.sh compare-diffs 1
+```
+This outputs: shared files, unique files per trajectory, scope deviations
+(files outside prompt scope), and diff similarity percentage. Read this
+output BEFORE writing any feedback.
+
+**THEN: Read both diff files completely.** For each trajectory, evaluate:
 1. **Correctness:** Does the implementation match what the prompt asked for?
 2. **Completeness:** Are all requirements addressed, or are things missing?
 3. **Code quality:** Is it well-structured, follows codebase conventions?
 4. **Tests:** Did it add/update tests? Do they cover the right cases?
 5. **Side effects:** Any unnecessary changes, broken imports, unrelated modifications?
+6. **Scope deviation:** Did it change files outside the prompt's expected scope? Check the `compare-diffs` output for flagged files. Submodule pointer changes (library/backtrace, library/stdarch, etc.) are common out-of-scope noise -- flag them.
 
 **V3 TRACE REVIEW (Step 5 requirement):**
-Also review model traces (reasoning/tool calls in tmux sessions), not just diffs:
+Also review model traces (from `capture-traces` output), not just diffs:
 - Did the model actually RUN tests, or only claim it did?
 - Did it investigate root cause, or just patch symptoms?
 - Did it avoid risky actions (delete, force push, reset) without confirmation?
@@ -1092,9 +1315,17 @@ Also review model traces (reasoning/tool calls in tmux sessions), not just diffs
 - Did it accurately report what it changed vs what actually changed in the diff?
 - Did it stop to ask clarification when something was genuinely ambiguous?
 
-Reference trace behavior in your strengths/weaknesses text (e.g. "Model A ran the
+Reference trace behavior in your Agency / Solution Quality text (e.g. "Model A ran the
 full test suite and fixed 2 failures before declaring done, while Model B only
 claimed tests pass without evidence in the trace").
+
+**GROUNDING VERIFICATION (MANDATORY -- failure here caused task rejection):**
+Before writing ANY feedback text, perform these checks:
+1. For every claim about what a model did/didnt do, find the exact diff hunk or trace line.
+2. Before saying "X is unique to Model B", search Model A's diff for X.
+3. If the `compare-diffs` output flagged scope deviations, mention them in Solution Quality.
+4. Do NOT cite specific test file names, line numbers, or compile errors unless they are literally visible in the diff or trace text.
+5. Do NOT relay what a model claims it did in its trace -- verify against the actual diff.
 
 **DEV ENVIRONMENT RULE (V3 requirement):**
 Do NOT penalize either trajectory for failing to install dependencies, failing to
@@ -1113,14 +1344,23 @@ in this format:
 ```
 ::SENIOR_EXPECTATIONS::
 [text using writing style rules -- what a senior eng would do]
-::MODEL_A_STRENGTHS::
-[evaluative text with "because"/"which means" -- cite files/functions]
-::MODEL_A_WEAKNESSES::
-[specific gaps -- cite files/functions]
-::MODEL_B_STRENGTHS::
-[evaluative text with "because"/"which means" -- cite files/functions]
-::MODEL_B_WEAKNESSES::
-[specific gaps -- cite files/functions]
+::MODEL_A_SOLUTION_QUALITY::
+[correctness, code quality, edge cases, tests. For Discussion/Ambiguous/Code Review:
+quality of reasoning/analysis. Evaluative with "because"/"which means" -- cite files/functions]
+::MODEL_A_AGENCY::
+[how model A behaved as independent agent: risky/destructive actions (or restraint),
+independent judgment, when it sought clarification. Must cite specific transcript evidence.
+Maps to SxS 5.5, 5.7, 5.9]
+::MODEL_A_COMMUNICATION::
+[quality of model A written output: clarity of reasoning and summary, honesty about
+what it did and did not do, documentation and comments. Reference transcript.
+Maps to SxS 5.6]
+::MODEL_B_SOLUTION_QUALITY::
+[same as Model A Solution Quality but for B]
+::MODEL_B_AGENCY::
+[same as Model A Agency but for B]
+::MODEL_B_COMMUNICATION::
+[same as Model A Communication but for B]
 ::RATINGS::
 6.1=[A1-B1]
 6.2=[A1-B1]
@@ -1138,7 +1378,10 @@ overall=[A1-B1]
 [Use the AXIS NAME, not the number. Write e.g. "Correctness --
 the winning model produced working code while the other failed to
 compile" NOT "6.1 -- ...". Reviewer must understand the axis
-without referencing a template.]
+without referencing a template.
+CALIBRATION: do NOT default to correctness. Pick the axis that actually
+decided the preference. If scope control, testing discipline, or honest
+self-reporting was the real driver, use that axis.]
 ::JUSTIFICATION::
 [2-3 sentences comparing A vs B with evidence]
 ::ACTION::
@@ -1188,19 +1431,15 @@ Compare Turn 2 with Turn 1. They must target DIFFERENT issues. If too similar, r
 
 #### STEP 5: Execute Turn 2 [AUTOMATION]
 
-**CRITICAL: Exit HFI and relaunch between turns.**
+After "Continue conversation" is selected, the HFI session stays running
+and accepts the next prompt directly. No exit/relaunch needed.
 
-**5a. Exit and relaunch (kills session, relaunches via tmux, runs /clear):**
-```bash
-bash automation/hfi_orchestrator.sh next-turn
-```
-
-**5b. Inject Turn 2 prompt:**
+**5a. Inject Turn 2 prompt:**
 ```bash
 bash automation/hfi_orchestrator.sh inject automation/data/turn2_prompt.txt
 ```
 
-**5c. Monitor trajectories:**
+**5b. Monitor trajectories:**
 Poll both trajectory tmux sessions until complete. If a trajectory
 asks for permission, it needs manual approval -- but this is rare.
 ```bash
@@ -1211,9 +1450,12 @@ bash automation/hfi_orchestrator.sh monitor
 
 ```bash
 bash automation/hfi_orchestrator.sh capture-diffs 2
+bash automation/hfi_orchestrator.sh capture-traces 2
+bash automation/hfi_orchestrator.sh compare-diffs 2
 ```
 
-Read `data/turn2_diff_A.txt` and `data/turn2_diff_B.txt`. Compare A vs B.
+Read `compare-diffs` output first. Then read diff files completely.
+Perform GROUNDING VERIFICATION (same as Step 2) before writing any claims.
 Determine winner and ratings. Generate feedback file following WRITING
 STYLE RULES. Save to `data/turn2_feedback.txt` (same format as Step 3).
 
@@ -1239,10 +1481,9 @@ Validate with `prompt_validator.py`. Fix any failures automatically.
 
 #### STEP 8: Execute Turn 3 [AUTOMATION]
 
-Same exit/relaunch cycle as Step 5.
+Same as Step 5. Inject prompt into the running session.
 
 ```bash
-bash automation/hfi_orchestrator.sh next-turn
 bash automation/hfi_orchestrator.sh inject automation/data/turn3_prompt.txt
 bash automation/hfi_orchestrator.sh monitor
 ```
@@ -1253,10 +1494,14 @@ Remind user to watch tmux sessions for permission prompts.
 
 ```bash
 bash automation/hfi_orchestrator.sh capture-diffs 3
+bash automation/hfi_orchestrator.sh capture-traces 3
+bash automation/hfi_orchestrator.sh compare-diffs 3
 ```
 
-Compare Turn 3 diffs. Determine winner. Generate feedback file following
-WRITING STYLE RULES. Save to `data/turn3_feedback.txt`.
+Read `compare-diffs` output first. Then read diff files completely.
+Perform GROUNDING VERIFICATION (same as Step 2) before writing any claims.
+Determine winner. Generate feedback file following WRITING STYLE RULES.
+Save to `data/turn3_feedback.txt`.
 
 **IMPORTANT:** Set `::ACTION::` to `finish` (not continue) since this is the final turn.
 
@@ -1278,15 +1523,19 @@ The file must contain ALL sections:
 
 **10.1 Senior Engineer Expectations** -- 3-5 sentences on what a strong senior would produce. Reference specific modules and strategies.
 
-**10.2 Model A Strengths** -- EVALUATIVE feedback with "because" / "which means". Every claim cites a file/function.
+**10.2 Model A -- Solution Quality** -- Correctness, code quality, edge cases, tests. For non-code tasks: quality of reasoning/analysis. Evaluative with "because"/"which means". Every claim cites a file/function.
 
-**10.3 Model A Weaknesses** -- Same format, specific file/function references.
+**10.3 Model A -- Agency** -- How it behaved as an independent agent: risky/destructive actions (or appropriate restraint), independent judgment, when it sought clarification, whether its engagement resembled a senior engineer. Must cite specific transcript evidence.
 
-**10.4 Model B Strengths** -- Same as 10.2 for B.
+**10.4 Model A -- Communication** -- Quality of written output: clarity of reasoning and final summary, honesty about what it did and did not do, documentation and comments. Reference transcript.
 
-**10.5 Model B Weaknesses** -- Same as 10.3 for B.
+**10.5 Model B -- Solution Quality** -- Same as 10.2 for B.
 
-**10.6 Axis Ratings (1-11)** -- For each axis:
+**10.6 Model B -- Agency** -- Same as 10.3 for B.
+
+**10.7 Model B -- Communication** -- Same as 10.4 for B.
+
+**10.8 Axis Ratings (1-11)** -- For each axis:
 - Rating (A1-A3, A4/B4, B1-B3)
 - 1-2 sentence justification with evidence
 
@@ -1294,9 +1543,9 @@ Axes: (1) Correctness, (2) Code quality, (3) Instruction adherence, (4) Right-si
 
 Rules: NEVER use N/A on any axis. Always rate and justify. Extreme ratings need strong evidence.
 
-**10.7 Overall Preference** -- Winner, rating, key-axis (required for non-tie), 2-3 sentence justification. Must be consistent with axis majority.
+**10.9 Overall Preference** -- Winner, rating, key-axis (required for non-tie), 2-3 sentence justification. Must be consistent with axis majority. Key-axis calibration: do NOT default to correctness -- pick the axis that actually decided the preference.
 
-**10.8 Turn Prompts Record** -- All 3 prompts listed.
+**10.10 Turn Prompts Record** -- All 3 prompts listed.
 
 Save directly as `automation/data/evaluation_final.md`
 (text is already in natural style per WRITING STYLE RULES).
@@ -1372,26 +1621,28 @@ Print a full summary and pre-filled Snorkel fields:
 
 ### CRITICAL RULES FOR MULTI-TURN AUTOMATION
 
-1. **Exit and relaunch between every turn** -- NEVER keep HFI running continuously
-2. **Do NOT run `git commit` between turns** -- HFI manages git state
-3. **Every follow-up prompt must target a DIFFERENT issue** -- no repeats across turns
-4. **Every follow-up must advance the implementation** -- no vague reviews
-5. **Evaluation claims must cite file/function evidence** -- no hand-waving
-6. **Ratings are relative** (A vs B), not absolute (vs ideal)
-7. **Justification language matches rating magnitude** -- A1 = "fails", A3 = "better structured"
-8. **NEVER use raw axis numbers (6.1, 6.2, etc.) in feedback or key-axis text** -- always use names: Correctness, Code quality, Instruction adherence, Right-sized solution, Safety judgment, Self-reporting accuracy, Professional judgment, Verification discipline, Question discipline, Senior SWE approach, Communication quality
-9. **NEVER rate all 11 axes identically** -- even when one trajectory clearly wins, differentiate per-axis based on what each model actually did. If the "loser" completed some sub-tasks, acknowledge that with moderate ratings on relevant axes
-10. **Prompt Type MUST be selected** on Snorkel -- verify before submitting
-11. **CLAUDE.md source text must be accurate** - CLAUDE.md was created before launching HFI, both models had it from the start
-8. **All generated text uses WRITING STYLE RULES** -- feedback, prompts, evaluation text all follow the 11 humanizing rules automatically
-9. **If a trajectory fails or produces no diff**, note it and rate accordingly
-10. **Validation is mandatory** -- `prompt_validator.py` on every prompt, `eval_checker.py` on evaluation
-11. **NEVER use N/A** on any axis, feedback field, or strengths/weaknesses section. Always provide a real answer
-12. **Strengths must be evaluative** with "because" / "which means"
-13. **Key-axis required** for all non-equivalent ratings
-14. **Submissions are irreversible** -- triple-check before Submit
-15. **User must review model traces** (reasoning, tool calls) in tmux, not just diffs
-16. **Turn 1+2 feedback: "Continue conversation". Turn 3: "Finish conversation"**
+1. **Do NOT run `git commit` between turns** -- HFI manages git state
+2. **Every follow-up prompt must target a DIFFERENT issue** -- no repeats across turns
+3. **Every follow-up must advance the implementation** -- no vague reviews
+4. **Evaluation claims must cite file/function evidence** -- no hand-waving
+5. **Ratings are relative** (A vs B), not absolute (vs ideal)
+6. **Justification language matches rating magnitude** -- A1 = "fails", A3 = "better structured"
+7. **NEVER use raw axis numbers (6.1, 6.2, etc.) in feedback or key-axis text** -- always use names: Correctness, Code quality, Instruction adherence, Right-sized solution, Safety judgment, Self-reporting accuracy, Professional judgment, Verification discipline, Question discipline, Senior SWE approach, Communication quality
+8. **NEVER rate all 11 axes identically** -- even when one trajectory clearly wins, differentiate per-axis based on what each model actually did. If the "loser" completed some sub-tasks, acknowledge that with moderate ratings on relevant axes
+9. **Prompt Type MUST be selected** on Snorkel -- verify before submitting
+10. **CLAUDE.md source text must be accurate** -- CLAUDE.md was created before launching HFI, both models had it from the start
+11. **All generated text uses WRITING STYLE RULES** -- feedback, prompts, evaluation text all follow the humanizing rules
+12. **If a trajectory fails or produces no diff**, note it and rate accordingly
+13. **Validation is mandatory** -- `prompt_validator.py` on every prompt, `eval_checker.py` on evaluation
+14. **NEVER use N/A** on any axis, feedback field, or Solution Quality/Agency/Communication section. Always provide a real answer
+15. **All evaluation fields must be evaluative** with "because" / "which means" -- explain WHY something matters, dont just describe that it happened
+16. **Key-axis required** for all non-equivalent ratings -- do NOT default to correctness, pick the axis that actually decided the preference
+17. **Submissions are irreversible** -- triple-check before Submit
+18. **Review model traces** (reasoning, tool calls) in tmux, not just diffs
+19. **Turn 1+2 feedback: "Continue conversation". Turn 3: "Finish conversation"**
+20. **GROUNDING IS MANDATORY** -- every claim must be traceable to a diff hunk or trace output. See Grounding Rules above. This was the direct cause of a task rejection.
+21. **Run `compare-diffs` before writing feedback** -- use `bash automation/hfi_orchestrator.sh compare-diffs <turn>` to get automated scope/similarity analysis before writing any feedback text
+22. **If both models produce identical output**, lean towards one model based on trace behavior (test execution, scope discipline, communication). Do NOT default to A4/B4.
 
 ---
 
@@ -1535,47 +1786,6 @@ Save state: `save_task_step "SETUP_DONE"`
 
 ---
 
-### PHASE 3.5: CLI LAUNCH + AUTHENTICATION
-
-**[YOUR TURN] Prerequisites:**
-```
-Make sure you have:
-  - claude-hfi binary in ~/Downloads/
-    (named darwin-arm64, darwin-x64, or claude-hfi)
-  - If not: download from https://feedback.anthropic.com/claude_code
-
-Type "binary ready" when you have it.
-```
-
-**[AUTOMATION]**
-```bash
-bash automation/hfi_orchestrator.sh launch <repo-path>
-```
-
-Or use the tmux-native launcher (avoids raw mode errors):
-```bash
-bash automation/hfi_orchestrator.sh launch-hfi <repo-path>
-```
-
-**[YOUR TURN] Authenticate:**
-```
-HFI is running in a tmux session.
-
-1. Attach to control:
-   tmux attach -t hfi-current  (or check: tmux ls)
-
-2. Complete browser authentication (use ALIAS email, NOT Google)
-
-3. When prompted for Interface Code, enter:
-   cc_agentic_coding_next
-
-4. Come back here and type: "authenticated"
-```
-
-Save state: `save_task_step "SETUP_DONE"`
-
----
-
 ### PHASE 3.5: CLAUDE.md CREATION (BEFORE LAUNCH)
 
 **CRITICAL: CLAUDE.md must be created BEFORE launching HFI.**
@@ -1686,7 +1896,7 @@ When complete, tell user:
     - Generate all feedback text (using humanizing rules)
     - Fill HFI feedback forms automatically
     - Generate Turn 2/3 prompts and inject them
-    - Handle exit/relaunch/clear between turns
+    - Run grounding verification on all claims before submitting
     - Produce Snorkel submission guidance at the end
 
   Your only action: final Snorkel web submission.
@@ -1700,12 +1910,15 @@ Save state: `save_task_step "TURN1_DONE"`
 ### PHASES 5-7: TURNS 2-3 + EVALUATION + QUALITY (FULLY AUTOMATED)
 
 The multi-turn automation handles everything from here:
-- Captures diffs, analyzes trajectories, determines winners
+- Captures diffs AND traces for each turn
+- Runs `compare-diffs` for scope deviation and similarity analysis
+- Performs grounding verification on all claims before writing feedback
 - Generates all feedback text using WRITING STYLE RULES
 - Fills HFI feedback forms automatically via `cmd_fill_feedback`
 - Generates Turn 2/3 prompts, validates, injects, monitors
-- Handles exit/relaunch/clear between turns automatically
+- Multi-turn happens within the same HFI session (no exit/relaunch needed)
 - Produces final evaluation and pre-submit checks
+- Logs all actions to the audit trail
 - Outputs Snorkel submission guidance with pre-filled fields
 
 **Human action required:** NONE until final Snorkel web submission.
@@ -1809,7 +2022,7 @@ for any text fields.
 **Phase 2:** No PR references, no role prompting, no em-dashes. Review draft for accuracy.
 **Phase 3:** Save HEAD commit for survey. Don't checkout PR branch.
 **Phase 4:** Monitor tmux sessions. Approve permission prompts.
-**Phase 5:** Each follow-up targets a DIFFERENT specific gap. Exit/relaunch between turns.
-**Phase 6:** Evaluative strengths with "because". Key-axis required. Never use N/A anywhere.
+**Phase 5:** Each follow-up targets a DIFFERENT specific gap. Run grounding verification before every feedback submission.
+**Phase 6:** Evaluative Solution Quality/Agency/Communication with "because". Key-axis required (dont default to correctness). Never use N/A.
 **Phase 7:** Run Submission Checker on Snorkel before final submit.
 **Phase 8:** IRREVERSIBLE. Triple-check everything.
