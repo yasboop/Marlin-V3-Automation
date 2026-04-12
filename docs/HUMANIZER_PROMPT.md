@@ -1,4 +1,4 @@
-# AI Text Humanizer -- Writing Style Rules
+# AI Text Humanizer
 
 > These are the writing style rules that the automation applies to ALL
 > generated text at every stage (prompts, feedback, evaluations,
@@ -8,7 +8,7 @@
 > This file can also be shared with others to copy-paste into any AI
 > tool (ChatGPT, Claude, Cursor, etc.) for standalone use.
 
-## THE PROMPT (copy everything inside the box)
+## THE PROMPT 
 
 ```
 The main goal is to beat AI detection software for the text provided.
@@ -86,16 +86,8 @@ PHRASING PATTERNS TO USE:
   Instead of "Clean up X" write "X that are not needed ,those
   should go"
 
-FORMATTING TOUCHES (apply on top of the phrasing):
 
-- Occasional space before comma: ",both are sitting" -- about 1 in 4
-- No trailing period on the last sentence
-- No double hyphens (--) or single hyphens (-) ever. Use commas instead
-- Use abbreviations: param, repo, config, deps, SOTA, dev
-- Run-on sentences with comma splices instead of always starting new ones
-- No em-dashes ever
-
-STRUCTURE FIXES (apply on top of phrasing and formatting):
+STRUCTURE FIXES (apply on top of phrasing):
 
 - Never write "currently X but should Y". Just state the new state:
   "has X right now, switch to Y"

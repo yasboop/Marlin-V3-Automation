@@ -7,6 +7,36 @@
 
 ---
 
+## START HERE
+
+**If you are new to Marlin V3**, read these sections in order before starting a task:
+
+1. **Marlin V3 Rules** (next section) - the hard rules. Violating any of these = task rejection or program removal. Skim the full list, focus on "Program-Level Rules" and "LLM Detection Signals"
+2. **Prompt Strategy** - the divergence-completion principle and 3-Turn Funnel. This determines how your prompts should be structured
+3. **Writing Style Rules** - how to humanize all text you generate. Reference `docs/HUMANIZER_PROMPT.md` for the full rephrase approach
+4. **Scenario Handbook** - what to do when things go wrong (identical outputs, one model fails, etc.)
+
+**When you are ready to start a task**, jump to the **END-TO-END GUIDED WORKFLOW** at the bottom of this file. It walks you through all 8 phases with clear human/automation checkpoints.
+
+**Key checklists** (use these at the point of output, not before):
+- **PROMPT PREPARATION CHECKLIST** (after section 3E) - run before/after writing all prompt prep fields
+- **TURN 2/3 PROMPT CHECKLIST** (after Turn 2/3 templates) - run before writing follow-up prompts
+- **FEEDBACK GENERATION CHECKLIST** (in FULL MULTI-TURN AUTOMATION) - run before/after writing feedback files
+
+**Quick navigation:**
+
+| Section | What it covers | Line |
+|---------|---------------|------|
+| Rules | Hard rules, LLM detection, grounding | Top |
+| Prompt Strategy | 3-Turn Funnel, divergence principle | After rules |
+| Scenario Handbook | Edge cases, troubleshooting, category guidance | After strategy |
+| Phase 2 - Prompt Prep | How to fill Snorkel fields | Middle |
+| Phase 3-4 Automation | Orchestrator commands, workflow cheat sheets | After Phase 2 |
+| Full Multi-Turn Automation | Detailed post-Turn-1 procedure | After cheat sheets |
+| End-to-End Guided Workflow | Complete Phase 1-8 for new tasks | Bottom |
+
+---
+
 ## MARLIN V3 RULES (CONSOLIDATED FROM ALL DOCS)
 
 These rules are extracted from all official training documentation. Violations of any = task rejection.
@@ -22,7 +52,7 @@ These rules are extracted from all official training documentation. Violations o
 - NO role-based prompting ("You are a senior engineer", "Act as an expert").
 - NO over-prescriptive instructions ("on line 47, change X to Y").
 - NO LLM signature words: leverage, utilize, delve, comprehensive, robust, streamline, facilitate, encompass, pivotal, intricate, nuanced, paradigm.
-- Word count: 150-300 words for initial prompt. (Note: official PDFs specify "6-8 engineer-hours of complexity" without a word count. This is our custom guideline.)
+- Word count: 80-200 words for initial prompt. Shorter is better for divergence. (Note: official PDFs specify "6-8 engineer-hours of complexity" without a word count. This is our custom guideline.)
 - Must read like a human-written GitHub issue, not an AI spec.
 - **Phased implementation:** The initial prompt is NOT required to include the full scope. Core logic in Turn 1, remaining related functionality (edge cases, tests, secondary features) in later turns is acceptable, as long as each turn advances the implementation concretely.
 - **Verifiable prompts:** Strongly encouraged but not mandatory. If open-ended, the acceptance criteria field must explicitly describe expected behaviour, signals for judging correctness, and what counts as incomplete. Open-ended does NOT mean lazy -- reviewers closely check the "What is the ideal response?" field.
@@ -61,7 +91,7 @@ These rules are extracted from all official training documentation. Violations o
   - **Communication**: clarity, honesty about what it did/didnt do, documentation. Maps to SxS 5.6.
 - All fields must be EVALUATIVE, not descriptive. Use "because" / "which means" to explain impact.
   - **Weak (descriptive):** "Model A added tests"
-  - **Strong (evaluative):** "Model A added regression coverage in tests/test_search.py::test_non_ascii_query. Without this test, a future refactor could silently reintroduce the bug."
+  - **Strong (evaluative):** "Model A added regression coverage for the non-ASCII query path. Without this test, a future refactor could silently reintroduce the bug." (Only cite specific filenames if they appear in the diff.)
 - **Evaluate each model independently** in the per-model fields (Solution Quality, Agency, Communication). Focus on what that model did on its own. Save all A-vs-B comparison for the overall preference justification and key-axis field.
 - **Build observations while reviewing**, not after. Take notes as you go through diffs and traces. Do not review both trajectories and then try to remember what you saw.
 - **Only note observations relevant to the rated axes.** Do not pad fields with irrelevant things like response time or number of tool calls. Every observation should map to one of the 11 axes or the Solution Quality/Agency/Communication fields.
@@ -470,20 +500,20 @@ Key-axis field is REQUIRED for A1, A2, A3, B1, B2, B3.
 
 ## TURN 2/3 PROMPT TEMPLATES
 
-**Note:** These are structural starting points. For Turn 1, see "Prompt Strategy" above -- keep it shorter and more open-ended (~80-150 words, describe problem + desired outcome) to create divergence between models. Turn 2/3 templates below are fine as-is since they are naturally specific.
+**Note:** These are structural starting points. For Turn 1, see "Prompt Strategy" above, keep it shorter and more open-ended (~80-200 words, describe problem + desired outcome) to create divergence between models. Turn 2/3 templates below are fine as-is since they are naturally specific.
 
 ### Turn 2 template (edge cases / hardening)
 ```
 Review the [module] changes from the previous turn. I found these gaps:
 
-1. [Specific gap -- e.g. "When X has zero dependencies, the lookup
+1. [Specific gap, e.g. "When X has zero dependencies, the lookup
    produces a KeyError because the key was never initialized."]
    Add a guard and a test case.
 
-2. [Second gap -- e.g. "The serializer does not handle empty mappings."]
+2. [Second gap, e.g. "The serializer does not handle empty mappings."]
    Add a test that round-trips an empty mapping.
 
-3. [Third gap -- e.g. "Method X calls list.index() which is O(n)."]
+3. [Third gap, e.g. "Method X calls list.index() which is O(n)."]
    Pre-compute a lookup dict during construction if feasible.
 
 Fix each issue. All tests (old and new) must pass.
@@ -506,6 +536,37 @@ The changes from previous turns need integration verification:
 
 Leave the code production-ready.
 ```
+
+#### TURN 2/3 PROMPT CHECKLIST (run before writing each follow-up prompt)
+
+**STRATEGY**
+
+- [ ] You are reacting to the WINNER's actual diff from the previous turn, not writing from scratch
+- [ ] Turn 2 = narrower scope: target 2-3 specific gaps you found in the winner's code
+- [ ] Turn 3 = narrowest scope: integration verification, cleanup, final edge cases
+- [ ] Each turn advances the implementation concretely (not "review everything")
+
+**CONTENT**
+
+- [ ] Names specific file(s) and function(s) where the gap exists
+- [ ] Describes the exact issue (not a vague concern)
+- [ ] Requests a concrete change (not "make sure it works")
+- [ ] 2-4 sentences maximum per gap
+- [ ] Gaps are grounded in what you actually saw in the diff, not hypothetical
+
+**HUMANIZATION**
+
+- [ ] No em-dashes or double hyphens
+- [ ] No LLM signature words (leverage, utilize, delve, etc.)
+- [ ] No role-based prompting
+- [ ] Reads like a dev filing a follow-up issue, not a polished specification
+- [ ] Varied sentence structure if listing multiple gaps
+
+**DETECTION**
+
+- [ ] No PR references (#digits, "this PR", branch names)
+- [ ] No over-prescriptive line-by-line instructions
+- [ ] Prompt is distinct from Turn 1 (different structure, different framing)
 
 RULES for follow-up prompts:
 - Each turn must identify a SPECIFIC issue (name file, function, behavior)
@@ -682,7 +743,7 @@ gh pr diff {pr_number} --repo {owner}/{repo}
 
 **MUST HAVE (hard requirements):**
 1. **Merged PR** — state must be MERGED (we need the "correct answer")
-2. **~2+ hour human effort** — complex enough for a senior engineer to spend 2+ hours
+2. **6-8 engineer-hours of effort** — complex enough for a senior engineer to spend 6-8 hours on
 3. **Multiple files** — PRs touching 5+ files across multiple directories preferred
 4. **Both additions AND deletions** — refactors (add + delete) are MUCH harder than pure additions
 5. **Clear description** — PR body must be detailed enough to write a Marlin prompt WITHOUT referencing the PR
@@ -785,7 +846,7 @@ Categories in **bold** are the hardest for models and thus best for Marlin.
 ---
 ---
 
-# PHASE 2 -- PROMPT PREPARATION
+# PHASE 2 - PROMPT PREPARATION
 
 > Phase 2 takes the selected repo + PR from Phase 1 and generates all the fields
 > needed for the Snorkel Prompt Preparation form. Cursor fetches the actual PR diff,
@@ -857,6 +918,22 @@ After fetching all data, study the diff carefully to understand:
 
 Produce EACH of the following sections. Each section maps to a specific field on the Snorkel form.
 
+**Run the PROMPT PREPARATION CHECKLIST (section 3E/3F boundary) before and after writing all fields.**
+
+**CRITICAL: Apply humanizer rules (docs/HUMANIZER_PROMPT.md) to ALL text
+fields below, not just the Initial Prompt.** Repo Definition, PR Definition,
+Edge Cases, Acceptance Criteria, Effort and Complexity all get pasted into
+Snorkel where reviewers can see them. If these fields read like polished
+AI output (identical openers, perfect parallel structure, zero hedging,
+no contractions, no fragments) they contribute to LLM detection signals.
+
+Anti-patterns to avoid across ALL fields:
+- Starting 3+ numbered items with the same word/phrase ("Done when...", "When the...", "The model...")
+- Perfect parallel sentence structure across all items in a list
+- Zero casual language in multi-sentence prose fields
+- Grammar that is too clean (no contractions, no fragments, no hedging)
+- Using double hyphens in any field
+
 ### FIELD 1: Prompt Category
 
 Select the SINGLE best-fit category from:
@@ -883,6 +960,8 @@ Write 3-5 sentences explaining what this repository does. Cover:
 - Who uses it and why it matters
 
 Write as if explaining to a colleague who has never seen this repo.
+**Apply humanizer rules.** This should sound like a dev describing
+a repo to a teammate, not a Wikipedia article or README blurb.
 
 ### FIELD 4: PR Definition
 
@@ -893,6 +972,8 @@ Write 3-5 sentences explaining what this specific PR changes and why. Cover:
 - What the impact is on the rest of the system
 
 Do NOT reference the PR number or URL. Write as if describing the planned work, not a completed PR.
+**Apply humanizer rules.** No polished corporate prose. Write like
+a dev would actually explain this change in a standup or Slack message.
 
 ### FIELD 5: Edge Cases
 
@@ -901,8 +982,12 @@ List 3-6 concrete, specific edge cases the model needs to handle. Each edge case
 - Describe what happens under that condition
 - Explain why it is tricky (not obvious)
 
+**Apply humanizer rules here.** Vary your sentence structure across items.
+Do not start all items with "When..." or any repeated opener. Mix up how
+you phrase each one. No double hyphens.
+
 Bad edge case: "Handle empty input"
-Good edge case: "When an asset spec has zero dependencies, the downstream adjacency lookup in the compute function produces a KeyError because the key was never initialized in the mapping -- the model needs to add a guard and initialize empty sets for assets with no deps."
+Good edge case: "Asset specs with zero dependencies cause a KeyError in the downstream adjacency lookup inside the compute function, the key never gets initialized in the mapping so it blows up. Need to guard against that and initialize empty sets for those assets"
 
 ### FIELD 6: Acceptance Criteria
 
@@ -911,13 +996,17 @@ List 4-8 concrete acceptance criteria. Each one must be:
 - Specific (names files, functions, behaviors)
 - Production-focused (not just "it works")
 
-Format each as: "Done when [specific observable outcome]"
+**DO NOT use the "Done when..." template for every item.** Starting all
+criteria with the same phrase creates a batched parallel list, which is
+a flagged LLM detection signal. Instead, vary your openers naturally.
+Write each criterion as a different kind of statement. Mix fragments,
+conditions, and plain descriptions. Apply humanizer rules.
 
-Example:
-- "Done when all serializable data classes round-trip cleanly through the serdes framework without data loss"
-- "Done when the sensor module delegates to the facade instead of computing its own data"
-- "Done when the old utility module is fully removed and no imports reference it"
-- "Done when existing tests pass and new tests cover the restructured data shapes"
+Example (notice varied openers):
+- "Serializable data classes should roundtrip cleanly through the serdes framework without dropping fields"
+- "The sensor module delegates to the facade instead of computing its own data at that point"
+- "Old utility module is fully removed, no imports reference it anywhere"
+- "Existing tests still pass and new tests cover the restructured data shapes"
 
 ### FIELD 7: Effort and Complexity (V3 REQUIREMENT)
 
@@ -927,8 +1016,12 @@ Example:
 - Edge cases where naive approaches break
 - Why a competent engineer would need 6-8 hours
 
+**Apply humanizer rules.** This should read like a dev explaining why
+something is hard to a teammate, not like a polished paragraph from
+a technical document.
+
 Bad: "This task requires changing 17 files across 4 crates."
-Good: "The trait is implemented by 6 different type relations spread across 4 compiler crates, each with its own constraints on how goals flow through the system. The opaque type handling path converts between Goal and Obligation at multiple boundaries, and getting any one conversion wrong silently breaks downstream diagnostic reporting. A naive search-and-replace misses the cases where the cause must be preserved for error messages."
+Good: "The trait gets implemented by 6 different type relations spread across 4 compiler crates and each one has its own constraints on how goals flow through the system. The opaque type handling path converts between Goal and Obligation at multiple boundaries, getting any one of those wrong silently breaks downstream diagnostic reporting. A naive search and replace misses the cases where the cause has to be preserved for error messages"
 
 ### FIELD 8: Testing Setup
 
@@ -963,12 +1056,12 @@ This is the actual prompt text that will be given to the model. This is the most
 - Open with 1-2 sentences describing the current state and its problem.
 - Follow with what needs to change, organized by logical concern (not by file).
 - End with what the final state should look like and how to verify it.
-- Total length: 150-300 words. Long enough to be specific, short enough to be focused.
+- Total length: 80-200 words. Shorter prompts produce better divergence. Long enough to set direction, short enough to leave room for the model.
 
 **GOOD EXAMPLE (from the Marlin guide):**
-"Update Gaphor's property editor to clearly separate model-level and diagram-level behavior for UML Dependency elements. Add a dedicated property page for Dependency model objects that shows Source and Target when selected from the model tree. Refactor the existing Dependency diagram item editor into a separate item-specific page with updated identifiers. Add support for the UML isFinalSpecialization attribute on classifiers and expose it through a toggle in the classifier property editor using proper transaction handling. Update the GTK UI definitions where needed and add unit tests to verify both Dependency property visibility and classifier specialization updates. The changes should follow the UML specification and leave the code production ready."
+"Gaphor's property editor currently mixes model-level and diagram-level behavior for UML Dependency elements and it needs to be separated properly. The Dependency model objects should get their own property page showing Source and Target when selected from the model tree, and the existing diagram item editor needs to be pulled out into a separate item-specific page with updated identifiers. There's also the isFinalSpecialization attribute on classifiers that isn't exposed anywhere right now, so that needs a toggle in the classifier property editor with proper transaction handling. GTK UI definitions will need updating to match, and unit tests should cover both the Dependency property visibility and classifier specialization updates. Everything should follow the UML spec and be production ready when done."
 
-Notice: no em-dashes, no role-based prompting, names exact components, verifiable outcomes, reads like a real issue, human-sounding.
+Notice: no em-dashes, no role-based prompting, names exact components, verifiable outcomes, reads like a real issue, human-sounding. Varied sentence structure, not a list of imperative commands.
 
 **OVER-PRESCRIPTIVE vs APPROPRIATELY SCOPED (V3 critical distinction):**
 
@@ -1091,18 +1184,65 @@ Or Cursor can self-check against these rules:
 2. Search for PR references: any pattern like #[digits], pull/[digits], PR-[digits], "this PR", "the PR", branch names from the gh data.
 3. Search for role-based phrases: "you are a", "act as", "as a senior", "as an expert", "imagine you are".
 4. Search for over-prescriptive patterns: "on line [number]", "in file X, change Y to Z", step-by-step numbered instructions telling the model exactly what to do in each file.
-5. Verify the prompt is 150-300 words.
+5. Verify the prompt is 80-200 words.
 6. Verify it reads like a human-written GitHub issue, not an LLM-generated specification.
 
 ---
 
-## 3E. Output format
+#### PROMPT PREPARATION CHECKLIST (run this before and after filling every field)
+
+This checklist consolidates every rule from the playbook that applies when
+generating prompt preparation fields. Go through it top to bottom. Do not skip items.
+
+**STRATEGY CHECK (before writing anything)**
+
+- [ ] Have you read the full PR diff, not just the description?
+- [ ] Have you identified the core problem the PR solves, independent of the PR itself?
+- [ ] Is the PR complex enough for 6-8 engineer-hours of work?
+- [ ] Have you planned the 3-Turn Funnel? Turn 1 = wide/vague (problem + outcome), Turn 2 = specific gaps from Turn 1 winner, Turn 3 = integration/cleanup
+- [ ] Does your Turn 1 prompt describe WHAT not HOW? No file paths, no line numbers, no step-by-step instructions
+- [ ] Is your Turn 1 prompt 80-200 words? Shorter is better for divergence
+
+**HUMANIZATION CHECK (apply to EVERY field, not just the prompt)**
+
+- [ ] No double hyphens (--) anywhere in any field
+- [ ] No em-dashes anywhere
+- [ ] No LLM signature words: leverage, utilize, delve, comprehensive, robust, streamline, facilitate, encompass, pivotal, intricate, nuanced, paradigm
+- [ ] No batched parallel lists (all items starting with the same word/pattern like "Done when...", "Add...", "Update...", "Ensure...")
+- [ ] Varied sentence structure across items in every list. Mix fragments, conditions, and plain descriptions
+- [ ] No perfect grammar everywhere. Drop some articles, use contractions, leave some rough edges
+- [ ] No terminal periods on list items (unless a full multi-sentence paragraph)
+- [ ] Reads like a dev writing to a teammate, not a polished doc or Wikipedia article
+- [ ] No role-based prompting in the prompt field ("you are a...", "act as...")
+
+**FIELD-SPECIFIC CHECKS**
+
+- [ ] Repo Definition: sounds like a dev describing a repo to a teammate, not a README blurb
+- [ ] PR Definition: sounds like a dev explaining a change in standup, not corporate prose
+- [ ] Edge Cases: each item uses a different opener. No repeated "When..." pattern. Each references a specific file/function from the diff
+- [ ] Acceptance Criteria: NO "Done when..." template. Vary openers across all items. Mix fragments, conditions, plain descriptions
+- [ ] Effort and Complexity: explains WHY the task is hard, not WHAT the task is. References specific cross-module interactions and non-obvious complexity
+- [ ] Initial Prompt: 80-200 words. Describes the problem and desired end-state. Does NOT prescribe implementation steps
+
+**DETECTION CHECKS (after writing everything)**
+
+- [ ] No PR references anywhere: no #digits, no "this PR", no "the PR", no branch names
+- [ ] No em-dashes or double hyphens
+- [ ] No role-based prompting
+- [ ] Not over-prescriptive (no "on line X, change Y to Z")
+- [ ] Prompt reads like a human-written GitHub issue
+- [ ] All edge cases are grounded in actual diff content (specific files/functions visible in the diff)
+- [ ] Acceptance criteria can be verified without reading the PR
+
+---
+
+## 3F. Output format
 
 Present all fields in this exact structure (ready to copy-paste into Snorkel):
 
 ```
 ============================================================
-MARLIN V3 -- PROMPT PREPARATION (READY TO SUBMIT)
+MARLIN V3 - PROMPT PREPARATION (READY TO SUBMIT)
 ============================================================
 
 PROMPT CATEGORY: [category name]
@@ -1130,9 +1270,9 @@ EDGE CASES:
 ...
 
 ACCEPTANCE CRITERIA:
-1. [verifiable criterion]
-2. [verifiable criterion]
-3. [verifiable criterion]
+1. [verifiable criterion, vary openers, no "Done when" template]
+2. [verifiable criterion, different sentence structure from #1]
+3. [verifiable criterion, mix fragments and full sentences]
 ...
 
 EFFORT AND COMPLEXITY:
@@ -1149,7 +1289,7 @@ PROMPT DEFINITION
 ------------------------------------------------------------
 
 INITIAL PROMPT:
-[The actual prompt text -- 150-300 words, human-sounding, no em-dashes,
+[The actual prompt text, 80-200 words, human-sounding, no em-dashes,
 no PR references, no role prompting, not over-prescriptive.
 V3: describe the PROBLEM and SUCCESS criteria. Do NOT hand-hold
 through every file/function/rename. Let the model figure out
@@ -1158,10 +1298,10 @@ implementation details.]
 ============================================================
 QUALITY CHECK RESULTS
 ============================================================
-- Em-dashes found: [Yes/No -- if Yes, list and fix them]
-- PR references found: [Yes/No -- if Yes, list and fix them]
-- Role-based prompting: [Yes/No -- if Yes, list and fix them]
-- Over-prescriptive: [Yes/No -- assessment per V3 guidance]
+- Em-dashes found: [Yes/No, if Yes list and fix them]
+- PR references found: [Yes/No, if Yes list and fix them]
+- Role-based prompting: [Yes/No, if Yes list and fix them]
+- Over-prescriptive: [Yes/No, assessment per V3 guidance]
 - Word count: [N words]
 - Reads like human-written issue: [Yes/No -- assessment]
 ============================================================
@@ -1191,42 +1331,55 @@ After your prompt is approved and you receive the tarball, use `hfi_orchestrator
 
 ```bash
 # Phase 3: Environment Setup
-bash hfi_orchestrator.sh setup ~/Downloads/repo.tar       # Unpack, git init, deps, tests
-bash hfi_orchestrator.sh claude-md /path/to/repo           # Generate CLAUDE.md (BEFORE launch)
-bash hfi_orchestrator.sh launch /path/to/repo              # Copy binary, start tmux session
+bash automation/hfi_orchestrator.sh setup ~/Downloads/repo.tar       # Unpack, git init, deps, tests
+bash automation/hfi_orchestrator.sh claude-md /path/to/repo           # Generate CLAUDE.md (BEFORE launch)
+bash automation/hfi_orchestrator.sh launch-hfi /path/to/repo           # Copy binary, start tmux session
 
 # Phase 4: Task Execution
-bash hfi_orchestrator.sh inject prompt.txt                 # Paste prompt into control session
-bash hfi_orchestrator.sh monitor                           # Watch trajectories until done
+bash automation/hfi_orchestrator.sh inject prompt.txt                 # Paste prompt into control session
+bash automation/hfi_orchestrator.sh monitor                           # Watch trajectories until done
 
 # Multi-Turn
-bash hfi_orchestrator.sh capture-diffs [turn#]             # Save A/B diffs
-bash hfi_orchestrator.sh next-turn                         # Exit HFI + relaunch --continue
-bash hfi_orchestrator.sh inject turn2_prompt.txt           # Inject next turn prompt
+bash automation/hfi_orchestrator.sh capture-diffs [turn#]             # Save A/B diffs
+bash automation/hfi_orchestrator.sh next-turn                         # Exit HFI + relaunch --continue
+bash automation/hfi_orchestrator.sh inject turn2_prompt.txt           # Inject next turn prompt
 
 # All-in-one
-bash hfi_orchestrator.sh full ~/Downloads/repo.tar prompt.txt
+bash automation/hfi_orchestrator.sh full ~/Downloads/repo.tar prompt.txt
 
 # Quality
-bash hfi_orchestrator.sh pre-submit                        # Full pre-submission check
+bash automation/hfi_orchestrator.sh pre-submit                        # Full pre-submission check
 
 # Utility
-bash hfi_orchestrator.sh status                            # Show current state
-bash hfi_orchestrator.sh set-session <id>                  # Manually set tmux session ID
+bash automation/hfi_orchestrator.sh status                            # Show current state
+bash automation/hfi_orchestrator.sh set-session <id>                  # Manually set tmux session ID
 ```
+
+### WHICH WORKFLOW TO FOLLOW
+
+This playbook contains three workflow descriptions. They are NOT alternatives, they serve different purposes:
+
+| Workflow | When to use | What it covers |
+|----------|-------------|----------------|
+| **Typical Workflow** (below) | Quick reference for experienced users | 14-step command cheat sheet, Phase 3-4 only |
+| **FULL MULTI-TURN AUTOMATION** (next section) | After Turn 1 is done and you say "automate the rest" | Detailed steps for captures, feedback, turns 2-3, evaluation |
+| **END-TO-END GUIDED WORKFLOW** (last section) | Starting a brand new task from scratch | Complete Phase 1-8 with banners and human checkpoints |
+
+**If you are new:** Start with END-TO-END GUIDED WORKFLOW. It covers everything.
+**If you have done tasks before:** Use Typical Workflow as a cheat sheet, FULL MULTI-TURN AUTOMATION for the detailed post-Turn-1 steps.
 
 ### Typical Workflow
 
 1. Download tarball from email, download `darwin-arm64` from feedback.anthropic.com
-2. `bash hfi_orchestrator.sh setup ~/Downloads/repo.tar` -- unpack, git init, deps, tests
-3. `bash hfi_orchestrator.sh claude-md /path/to/repo` -- create CLAUDE.md BEFORE launch
-4. `bash hfi_orchestrator.sh launch-hfi /path/to/repo` -- launch HFI via tmux (proper TTY)
+2. `bash automation/hfi_orchestrator.sh setup ~/Downloads/repo.tar` -- unpack, git init, deps, tests
+3. `bash automation/hfi_orchestrator.sh claude-md /path/to/repo` -- create CLAUDE.md BEFORE launch
+4. `bash automation/hfi_orchestrator.sh launch-hfi /path/to/repo` -- launch HFI via tmux (proper TTY)
 5. **[HUMAN]** Authenticate in browser, enter Interface Code: `cc_agentic_coding_next`
-6. `bash hfi_orchestrator.sh inject prompt.txt` -- submits your approved prompt (Turn 1)
-8. `bash hfi_orchestrator.sh monitor` -- wait for trajectories to complete
-9. `bash hfi_orchestrator.sh fill-feedback data/turn1_feedback.txt` -- automated form fill
-10. `bash hfi_orchestrator.sh next-turn` -- kill session, relaunch, /clear
-11. `bash hfi_orchestrator.sh inject turn2_prompt.txt` -- inject Turn 2 prompt
+6. `bash automation/hfi_orchestrator.sh inject prompt.txt` -- submits your approved prompt (Turn 1)
+8. `bash automation/hfi_orchestrator.sh monitor` -- wait for trajectories to complete
+9. `bash automation/hfi_orchestrator.sh fill-feedback data/turn1_feedback.txt` -- automated form fill
+10. `bash automation/hfi_orchestrator.sh next-turn` -- kill session, relaunch, /clear
+11. `bash automation/hfi_orchestrator.sh inject turn2_prompt.txt` -- inject Turn 2 prompt
 12. Repeat monitor -> fill-feedback -> next-turn -> inject for Turn 3
 13. On Turn 3: feedback file uses `::ACTION:: finish` instead of `continue`
 14. **[HUMAN]** Fill Snorkel Reflection form and Submit
@@ -1236,7 +1389,7 @@ bash hfi_orchestrator.sh set-session <id>                  # Manually set tmux s
 - Uses `--tmux` mode (not `--vscode`) for scriptability
 - The CLI binary must be in `~/Downloads/` before running `launch`
 - Interface code for V3: `cc_agentic_coding_next`
-- Multi-turn runs within the same HFI session. Use `next-turn` only if session is stuck or context-limited.
+- Multi-turn: use `next-turn` between each turn to kill the session, relaunch, and clear context. This is the normal flow, not a recovery step.
 - **DO NOT** run `git commit` between turns -- the CLI manages git state
 - **DO NOT** check out the PR branch -- work from the pre-PR commit
 - **CLAUDE.md** must be created BEFORE launch (after setup, before HFI starts)
@@ -1335,7 +1488,81 @@ not a model deficiency. Note it in your feedback but do not let it affect rating
 
 Determine the winner (A or B). Write a brief justification (2-3 sentences).
 
+#### FEEDBACK GENERATION CHECKLIST (run this before and after writing every feedback file)
+
+This checklist consolidates every rule from the playbook that applies when
+generating a feedback text file. Go through it top to bottom. Do not skip items.
+
+**BEFORE WRITING (data gathering)**
+
+- [ ] Read BOTH diff files completely (turn{N}_diff_A.txt, turn{N}_diff_B.txt)
+- [ ] Read BOTH trace files completely (turn{N}_trace_A.txt, turn{N}_trace_B.txt)
+- [ ] Run `compare-diffs` and note scope deviations, shared/unique files, similarity %
+- [ ] Count sub-tasks completed by each trajectory (partial credit rule)
+- [ ] Take notes per model INDEPENDENTLY while reviewing. Do not wait till the end to remember what you saw
+- [ ] For each trajectory verify: did it actually RUN tests (check trace), or only claim it did?
+- [ ] For each trajectory verify: did it investigate root cause or just patch symptoms?
+- [ ] For each trajectory verify: did it do risky actions (delete, force push, reset) without confirmation?
+- [ ] For each trajectory verify: does its self-reported summary match the actual diff?
+- [ ] Check if dev environment failures affected either trajectory (do NOT penalize if setup wasnt done)
+
+**WHILE WRITING EACH FIELD**
+
+- [ ] **Evaluative not descriptive**: every sentence has "because" / "which means" / impact explanation. "Model A added tests" is weak. "Model A added regression coverage in tests/test_search.py::test_non_ascii_query, without this a future refactor could silently reintroduce the bug" is strong.
+- [ ] **Per-model fields are independent**: Solution Quality, Agency, Communication for each model talk about THAT model only. No "compared to Model B" language in per-model fields. All comparison goes into justification and key-axis.
+- [ ] **Every factual claim cites a specific file/function/diff hunk**: if you cannot point to where in the diff or trace you saw it, remove the claim.
+- [ ] **Cross-model verification**: before writing "X is unique to Model A", search Model B's diff for X. Both models often make similar changes.
+- [ ] **Scope deviation flagged**: if `compare-diffs` flagged out-of-scope files, mention them in Solution Quality.
+- [ ] **Check HOW not just WHAT**: if both models ran the linter, check HOW each ran it. One might have used wrong command, applied autofixing that created undesirable changes, or added comments that a real contributor would not write.
+- [ ] **Go deeper than surface**: "73 test cases" might be garbage when you actually check what they test. "Failed completely" might be a minor coordinate bug in otherwise correct implementation. Verify magnitude.
+- [ ] **Only note observations relevant to rated axes**: do not pad fields with response time, number of tool calls, or other irrelevant things.
+- [ ] **Evidence directly, not vague labels**: "Model B has better error handling" is bad. "Model B wraps the getQuote and addPromoCode calls in try/catch with distinct error messages using the logger, Model A adds try/catch but does not parse the error object from the upstream 200 response" is good.
+- [ ] **Agency field cites specific transcript evidence**: mention actual trace behavior (ran test suite, explored codebase structure before diving in, asked clarification). Maps to SxS 5.5, 5.7, 5.9.
+- [ ] **Communication field references actual model output**: clarity of reasoning, honesty about what it did/didnt do, documentation quality. Maps to SxS 5.6.
+
+**RATING RULES**
+
+- [ ] No blanket extreme ratings: if the loser completed partial work, some axes MUST reflect it (use A3/B3 or A4/B4 on those axes)
+- [ ] Never rate all 11 axes identically, it signals lazy evaluation
+- [ ] Rating language matches magnitude: A1/B1 = "fails/broken", A2/B2 = "substantially better", A3/B3 = "better structured", A4/B4 = "minor differences only"
+- [ ] Overall preference is consistent with the majority direction of axis ratings
+- [ ] Key-axis uses axis NAME (e.g. "Correctness", "Scope control"), NEVER raw numbers (e.g. "6.1"). Raw numbers signal template usage and trigger rejection.
+- [ ] Key-axis calibration: do NOT default to correctness. If scope control, testing discipline, or self-reporting honesty was the real driver, use that axis.
+- [ ] Extreme ratings (A1/B1) are backed by strong evidence ("fails", "broken", "incorrect")
+- [ ] NEVER use N/A for any axis or field
+
+**JUSTIFICATION AND KEY-AXIS**
+
+- [ ] Justification is self-contained: assume the reader has NOT seen your per-model fields. Resurface key points that drove the preference. Do not say "as mentioned above".
+- [ ] Justification is 2-3 sentences (concise, comparative, evidence-backed)
+- [ ] Justification is comparative: this is where A-vs-B comparison belongs
+- [ ] Key-axis identifies the single axis that ACTUALLY decided the preference
+
+**AFTER WRITING ALL FIELDS (humanization and detection avoidance)**
+
+- [ ] Apply `docs/HUMANIZER_PROMPT.md` to ALL text fields: rephrase every sentence into 3 options, pick the least AI-characteristic one
+- [ ] Text reads like a professional Indian developer wrote it, technically precise but with natural Indian English phrasing patterns
+- [ ] No em-dashes anywhere (use comma or period instead)
+- [ ] No double hyphens used as em-dashes
+- [ ] No trailing periods at end of bullet points or short statements
+- [ ] No random bolding of words mid-sentence
+- [ ] No batched parallel lists with equal-weight identical-structure items
+- [ ] Grammar is NOT too perfect: include at least some natural phrasing like contractions, hedging, sentence fragments, or run-on sentences that a real developer would write
+- [ ] No hallucinations: every function name, file name, class name you mention actually exists in the diff or trace
+- [ ] No LLM signature words: avoid "leverage", "utilize", "comprehensive", "robust", "streamline", "facilitate", "optimal", "enhance", "furthermore", "additionally", "in conclusion", "it is worth noting"
+- [ ] Read the final text out loud (mentally). Does it sound like a human developer typed it in a text editor, or like a polished AI response?
+
+**FINAL PRE-SUBMISSION GATE**
+
+- [ ] Re-read every claim in the feedback against the actual diff one more time. If a claim cannot be traced to a diff hunk, remove or rewrite it.
+- [ ] Run Snorkel Submission Checker if available (Marlin-Submission-Checker-V3)
+- [ ] Verify the ACTION field is correct: "continue" for Turns 1-2, "finish" for Turn 3
+
+---
+
 #### STEP 3: Generate + Submit Feedback (Turn 1) [AUTOMATION]
+
+**Run the FEEDBACK GENERATION CHECKLIST above before and after writing.**
 
 Using the diff analysis from Step 2, generate a structured feedback file
 following the WRITING STYLE RULES. Save it to `data/turn1_feedback.txt`
@@ -1375,9 +1602,9 @@ Maps to SxS 5.6]
 6.11=[A1-B1]
 overall=[A1-B1]
 ::KEY_AXIS::
-[Use the AXIS NAME, not the number. Write e.g. "Correctness --
+[Use the AXIS NAME, not the number. Write e.g. "Correctness:
 the winning model produced working code while the other failed to
-compile" NOT "6.1 -- ...". Reviewer must understand the axis
+compile" NOT "6.1: ...". Reviewer must understand the axis
 without referencing a template.
 CALIBRATION: do NOT default to correctness. Pick the axis that actually
 decided the preference. If scope control, testing discipline, or honest
@@ -1456,6 +1683,7 @@ bash automation/hfi_orchestrator.sh compare-diffs 2
 
 Read `compare-diffs` output first. Then read diff files completely.
 Perform GROUNDING VERIFICATION (same as Step 2) before writing any claims.
+**Run the FEEDBACK GENERATION CHECKLIST (in Step 2) before and after writing.**
 Determine winner and ratings. Generate feedback file following WRITING
 STYLE RULES. Save to `data/turn2_feedback.txt` (same format as Step 3).
 
@@ -1500,6 +1728,7 @@ bash automation/hfi_orchestrator.sh compare-diffs 3
 
 Read `compare-diffs` output first. Then read diff files completely.
 Perform GROUNDING VERIFICATION (same as Step 2) before writing any claims.
+**Run the FEEDBACK GENERATION CHECKLIST (in Step 2) before and after writing.**
 Determine winner. Generate feedback file following WRITING STYLE RULES.
 Save to `data/turn3_feedback.txt`.
 
@@ -1517,25 +1746,25 @@ then Tab to Submit and Enter.
 
 #### STEP 10: Generate Evaluation Writeup [AUTOMATION]
 
-Read ALL diffs (Turns 1-3, both A and B). Produce the evaluation and save to `automation/data/evaluation_draft.md`.
+Read ALL diffs (Turns 1-3, both A and B). Produce the evaluation and save to `automation/data/evaluation_final.md`.
 
 The file must contain ALL sections:
 
-**10.1 Senior Engineer Expectations** -- 3-5 sentences on what a strong senior would produce. Reference specific modules and strategies.
+**10.1 Senior Engineer Expectations**: 3-5 sentences on what a strong senior would produce. Reference specific modules and strategies.
 
-**10.2 Model A -- Solution Quality** -- Correctness, code quality, edge cases, tests. For non-code tasks: quality of reasoning/analysis. Evaluative with "because"/"which means". Every claim cites a file/function.
+**10.2 Model A, Solution Quality**: Correctness, code quality, edge cases, tests. For non-code tasks: quality of reasoning/analysis. Evaluative with "because"/"which means". Every claim cites a file/function.
 
-**10.3 Model A -- Agency** -- How it behaved as an independent agent: risky/destructive actions (or appropriate restraint), independent judgment, when it sought clarification, whether its engagement resembled a senior engineer. Must cite specific transcript evidence.
+**10.3 Model A, Agency**: How it behaved as an independent agent: risky/destructive actions (or appropriate restraint), independent judgment, when it sought clarification, whether its engagement resembled a senior engineer. Must cite specific transcript evidence.
 
-**10.4 Model A -- Communication** -- Quality of written output: clarity of reasoning and final summary, honesty about what it did and did not do, documentation and comments. Reference transcript.
+**10.4 Model A, Communication**: Quality of written output: clarity of reasoning and final summary, honesty about what it did and did not do, documentation and comments. Reference transcript.
 
-**10.5 Model B -- Solution Quality** -- Same as 10.2 for B.
+**10.5 Model B, Solution Quality**: Same as 10.2 for B.
 
-**10.6 Model B -- Agency** -- Same as 10.3 for B.
+**10.6 Model B, Agency**: Same as 10.3 for B.
 
-**10.7 Model B -- Communication** -- Same as 10.4 for B.
+**10.7 Model B, Communication**: Same as 10.4 for B.
 
-**10.8 Axis Ratings (1-11)** -- For each axis:
+**10.8 Axis Ratings (1-11)**: For each axis:
 - Rating (A1-A3, A4/B4, B1-B3)
 - 1-2 sentence justification with evidence
 
@@ -1543,9 +1772,9 @@ Axes: (1) Correctness, (2) Code quality, (3) Instruction adherence, (4) Right-si
 
 Rules: NEVER use N/A on any axis. Always rate and justify. Extreme ratings need strong evidence.
 
-**10.9 Overall Preference** -- Winner, rating, key-axis (required for non-tie), 2-3 sentence justification. Must be consistent with axis majority. Key-axis calibration: do NOT default to correctness -- pick the axis that actually decided the preference.
+**10.9 Overall Preference**: Winner, rating, key-axis (required for non-tie), 2-3 sentence justification. Must be consistent with axis majority. Key-axis calibration: do NOT default to correctness, pick the axis that actually decided the preference.
 
-**10.10 Turn Prompts Record** -- All 3 prompts listed.
+**10.10 Turn Prompts Record**: All 3 prompts listed.
 
 Save directly as `automation/data/evaluation_final.md`
 (text is already in natural style per WRITING STYLE RULES).
@@ -1663,7 +1892,7 @@ Print banner:
 
 ```
 ================================================================
-  MARLIN V3 -- FULL TASK WORKFLOW (v2)
+  MARLIN V3 - FULL TASK WORKFLOW (v2)
   End-to-end guided automation with human-in-the-loop
 ================================================================
 

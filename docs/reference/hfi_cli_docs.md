@@ -21,6 +21,11 @@
 
 ## Changelog
 
+### New in 2.1.98
+- Based on Claude Code v2.1.98 codebase.
+- Fix for 1M context window.
+- Fixed missing cursor when entering the interface code on session start.
+
 ### New in 2.1.85
 - Based on Claude Code v2.1.85 codebase.
 - Trajectories now fail fast on tool result issues (missing results, placeholder content) instead of continuing to submission. You'll see the error immediately rather than after completing feedback.
