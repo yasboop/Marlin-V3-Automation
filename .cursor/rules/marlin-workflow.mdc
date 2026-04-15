@@ -47,3 +47,21 @@ See the "Grounding Rules" section in `automation/playbook.md`.
 
 Always use the orchestrator commands. Never bypass them with raw tmux commands.
 The orchestrator saves audit logs, creates backups, and enforces step ordering.
+
+## Recovery Rule
+
+If the user says anything indicating a turn failed, got corrupted, needs to be
+redone, or went wrong (e.g. "turn 2 failed", "wrong prompt", "redo this turn",
+"injection messed up", "trajectories got garbage", "need to retry"), follow the
+"When a turn needs to be re-run" section in the Scenario Handbook of
+`automation/playbook.md`. The key steps:
+
+1. Run `bash automation/hfi_orchestrator.sh diagnose` to check submission status
+2. If feedback was NOT submitted for the failed turn:
+   `bash automation/hfi_orchestrator.sh retry-turn <N>`
+3. After HFI comes back up, re-inject the prompt:
+   `bash automation/hfi_orchestrator.sh inject data/turnN_prompt.txt`
+4. If feedback WAS already submitted: inform the user the turn cannot be undone.
+
+NEVER manually delete HFI session files or run raw tmux commands for recovery.
+Use the orchestrator's retry-turn command which handles everything safely.

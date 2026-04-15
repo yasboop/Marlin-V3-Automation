@@ -819,7 +819,7 @@ cmd_launch() {
   tmux kill-session -t "$launcher_name" 2>/dev/null || true
 
   echo -e "  Launching HFI in tmux session: ${BOLD}$launcher_name${NC}"
-  echo -e "  ${DIM}HFI --tmux mode creates separate sessions for trajectories${NC}"
+  echo -e "  ${DIM}HFI --tmux mode creates windows :0 (control), :1 (A), :2 (B)${NC}"
   echo ""
 
   tmux new-session -d -s "$launcher_name" -c "$repo_path" \
@@ -844,10 +844,23 @@ cmd_launch() {
   if [ -n "$session_id" ]; then
     save_state "session_id" "$session_id"
     echo -e "  ${GREEN}ok${NC} Session ID: ${BOLD}$session_id${NC}"
+
+    # Eagerly discover and persist the worktree cache dir so every
+    # subsequent command reads it from state instead of re-resolving.
+    local cache_base="$HOME/.cache/claude-hfi"
+    local encoded_path
+    encoded_path=$(echo "$repo_path" | tr '/' '-' | tr '_' '-')
+    if [ -d "$cache_base/$encoded_path" ]; then
+      save_state "worktree_dir" "$cache_base/$encoded_path"
+      echo -e "  ${GREEN}ok${NC} Worktree dir: ${BOLD}$cache_base/$encoded_path${NC}"
+    else
+      echo -e "  ${DIM}Worktree dir not yet created (will resolve on first use)${NC}"
+    fi
+
     echo ""
-    echo -e "  Trajectory A: ${CYAN}tmux attach -t ${session_id}-A${NC}"
-    echo -e "  Trajectory B: ${CYAN}tmux attach -t ${session_id}-B${NC}"
-    echo -e "  Control:      ${CYAN}tmux attach -t $launcher_name${NC}"
+    echo -e "  Trajectory A: ${CYAN}tmux select-window -t ${session_id}:1${NC}"
+    echo -e "  Trajectory B: ${CYAN}tmux select-window -t ${session_id}:2${NC}"
+    echo -e "  Control:      ${CYAN}tmux attach -t ${session_id}:0${NC}"
   else
     echo -e "  ${YELLOW}Could not auto-detect session ID.${NC}"
     echo -e "  Run ${BOLD}tmux ls${NC} to find it, then:"
@@ -889,7 +902,7 @@ cmd_set_session() {
   fi
   save_state "session_id" "$session_id"
   echo -e "  ${GREEN}ok${NC} Session ID saved: ${BOLD}$session_id${NC}"
-  echo -e "  Trajectories: ${session_id}-A, ${session_id}-B"
+  echo -e "  Trajectories: ${session_id}:1 (A), ${session_id}:2 (B)"
 }
 
 # ---------------------------------------------------------------------------
@@ -914,19 +927,41 @@ cmd_inject() {
     exit 1
   fi
 
+  # Resolve the prompt source to a file. The argument is ALWAYS treated as a
+  # file path. We never silently fall back to treating it as raw text because
+  # that is what caused the Turn 2 injection failure (filepath string got
+  # pasted verbatim into HFI).
+  #
+  # Resolution order:
+  #   1. Absolute path or valid relative path from CWD
+  #   2. Relative to SCRIPT_DIR  (automation/)
+  #   3. Relative to SCRIPT_DIR/.. (workspace root)
+  # If none resolve, exit with an error.
+
   local prompt_text
+  local resolved_path=""
+
   if [ "$prompt_source" = "--file" ]; then
-    local prompt_file="${2:-}"
-    if [ -z "$prompt_file" ] || [ ! -f "$prompt_file" ]; then
-      echo -e "  ${RED}File not found: $prompt_file${NC}"
-      exit 1
-    fi
-    prompt_text=$(cat "$prompt_file")
-  elif [ -f "$prompt_source" ]; then
-    prompt_text=$(cat "$prompt_source")
-  else
-    prompt_text="$prompt_source"
+    prompt_source="${2:-}"
   fi
+
+  if [ -f "$prompt_source" ]; then
+    resolved_path="$prompt_source"
+  elif [ -f "${SCRIPT_DIR}/${prompt_source}" ]; then
+    resolved_path="${SCRIPT_DIR}/${prompt_source}"
+  elif [ -f "${SCRIPT_DIR}/../${prompt_source}" ]; then
+    resolved_path="${SCRIPT_DIR}/../${prompt_source}"
+  else
+    echo -e "  ${RED}File not found: $prompt_source${NC}"
+    echo -e "  ${RED}  Also tried: ${SCRIPT_DIR}/${prompt_source}${NC}"
+    echo -e "  ${RED}  Also tried: ${SCRIPT_DIR}/../${prompt_source}${NC}"
+    echo -e ""
+    echo -e "  ${DIM}Tip: use an absolute path to avoid CWD issues.${NC}"
+    exit 1
+  fi
+
+  prompt_text=$(cat "$resolved_path")
+  echo -e "  ${DIM}Resolved: ${resolved_path}${NC}"
 
   echo -e "${BOLD}PHASE 4.1: INJECT PROMPT${NC}"
   echo -e "${YELLOW}------------------------------------------------------------${NC}"
@@ -936,33 +971,76 @@ cmd_inject() {
   word_count=$(echo "$prompt_text" | wc -w | tr -d ' ')
   echo -e "  Session:  ${BOLD}$session_id${NC}"
   echo -e "  Words:    ${BOLD}$word_count${NC}"
+
+  if [ "$word_count" -lt 5 ]; then
+    echo ""
+    echo -e "  ${RED}ABORT: Prompt has only $word_count word(s).${NC}"
+    echo -e "  ${RED}This looks like a file path or empty file was read instead of actual prompt content.${NC}"
+    echo -e "  ${DIM}File: $resolved_path${NC}"
+    echo -e "  ${DIM}Content preview: $(head -c 200 "$resolved_path")${NC}"
+    exit 1
+  fi
   echo ""
 
-  # Determine target: use launcher_session (where HFI control runs)
-  local launcher_session
-  launcher_session=$(load_state launcher_session)
-  local control_target=""
+  resolve_tmux_targets
+  local control_target="$TMUX_CTRL"
 
-  if [ -n "$launcher_session" ] && tmux has-session -t "$launcher_session" 2>/dev/null; then
-    control_target="$launcher_session"
-  else
-    # Fallback: find any hfi-* session
-    local hfi_sess
-    hfi_sess=$(tmux ls -F '#{session_name}' 2>/dev/null | grep '^hfi-' | head -1 || echo "")
-    if [ -n "$hfi_sess" ]; then
-      control_target="$hfi_sess"
-      echo -e "  ${YELLOW}Using detected session: $hfi_sess${NC}"
-    else
-      echo -e "  ${RED}No active HFI session found.${NC}"
-      echo -e "  Active tmux sessions:"
-      tmux ls 2>/dev/null || echo "  (none)"
-      echo ""
-      echo -e "  ${DIM}Launch HFI first: bash $0 launch <repo-path>${NC}"
-      exit 1
-    fi
+  if [ "$TMUX_LAYOUT" = "none" ]; then
+    echo -e "  ${RED}No active HFI session found.${NC}"
+    echo -e "  ${DIM}Tried windows layout (${session_id}:0) and separate sessions (${session_id}-A/-B)${NC}"
+    echo -e "  Active tmux sessions:"
+    tmux ls 2>/dev/null || echo "  (none)"
+    echo ""
+    echo -e "  ${DIM}Launch HFI first: bash $0 launch <repo-path>${NC}"
+    exit 1
   fi
 
+  echo -e "  Layout:   ${CYAN}${TMUX_LAYOUT}${NC}"
+
   echo -e "  Target:   ${BOLD}$control_target${NC}"
+
+  # Safety: check that the control pane is showing a prompt input, NOT a
+  # feedback form. If we inject into a feedback form, the text fills form
+  # fields instead of going to the agent - which is exactly what happened
+  # in the Turn 2 recovery attempt.
+  local pane_content
+  pane_content=$(tmux capture-pane -t "$control_target" -p 2>/dev/null || echo "")
+  if echo "$pane_content" | grep -qi "Solution Quality\|Correctness\|Mergeability\|Overall justification\|Senior engineer.*expect\|Which response is better" 2>/dev/null; then
+    echo ""
+    echo -e "  ${RED}ABORT: The control pane appears to be showing a FEEDBACK FORM.${NC}"
+    echo -e "  ${RED}Injecting here would fill form fields instead of sending to the agent.${NC}"
+    echo -e "  ${DIM}Current pane content (last 5 lines):${NC}"
+    echo "$pane_content" | tail -5 | while read -r line; do
+      echo -e "    ${DIM}$line${NC}"
+    done
+    echo ""
+    echo -e "  ${YELLOW}Fix: Submit or dismiss the feedback form first, then retry inject.${NC}"
+    exit 1
+  fi
+
+  # For Turn 2+, send /clear before injecting to reset conversation context
+  # from the previous turn. Prevents context limit issues in later turns.
+  local current_turn
+  current_turn=$(load_state current_turn)
+  current_turn="${current_turn:-1}"
+
+  if [ "$current_turn" -gt 1 ] 2>/dev/null; then
+    echo ""
+    echo -e "  ${BOLD}Turn $current_turn detected -- clearing previous context...${NC}"
+    tmux send-keys -t "$control_target" -l "/clear"
+    sleep 0.5
+    tmux send-keys -t "$control_target" Enter
+    sleep 3
+
+    local clear_output
+    clear_output=$(tmux capture-pane -t "$control_target" -p 2>/dev/null || echo "")
+    if echo "$clear_output" | grep -qi "no content\|cleared\|context\|❯" 2>/dev/null; then
+      echo -e "  ${GREEN}ok${NC} Context cleared"
+    else
+      echo -e "  ${DIM}Could not confirm /clear -- proceeding with inject${NC}"
+    fi
+    echo ""
+  fi
 
   # Send the prompt text using load-buffer for reliability
   local tmpfile
@@ -992,25 +1070,30 @@ cmd_inject() {
 cmd_monitor() {
   local session_id
   session_id=$(load_state session_id)
-  local launcher_session
-  launcher_session=$(load_state launcher_session)
 
   if [ -z "$session_id" ]; then
     echo -e "  ${RED}No session ID found. Run 'launch' first or 'set-session <id>'.${NC}"
     exit 1
   fi
 
-  # --tmux mode creates SEPARATE sessions: <id>-A and <id>-B
-  local sess_a="${session_id}-A"
-  local sess_b="${session_id}-B"
-  local sess_ctrl="${launcher_session:-${session_id}-control}"
+  resolve_tmux_targets
+  local win_a="$TMUX_A"
+  local win_b="$TMUX_B"
+  local win_ctrl="$TMUX_CTRL"
+
+  if [ "$TMUX_LAYOUT" = "none" ]; then
+    echo -e "  ${RED}No tmux sessions found for $session_id (tried windows and separate sessions).${NC}"
+    echo -e "  ${YELLOW}Run 'launch' or 'retry-turn' first.${NC}"
+    exit 1
+  fi
 
   echo -e "${BOLD}PHASE 4.2: MONITORING TRAJECTORIES${NC}"
   echo -e "${YELLOW}------------------------------------------------------------${NC}"
   echo ""
   echo -e "  Session: ${BOLD}$session_id${NC}"
-  echo -e "  Watching: ${CYAN}$sess_a${NC}, ${CYAN}$sess_b${NC}"
-  echo -e "  Control:  ${CYAN}$sess_ctrl${NC}"
+  echo -e "  Layout:  ${CYAN}${TMUX_LAYOUT}${NC}"
+  echo -e "  Watching: ${CYAN}${win_a}${NC} (A), ${CYAN}${win_b}${NC} (B)"
+  echo -e "  Control:  ${CYAN}${win_ctrl}${NC}"
   echo -e "  ${DIM}Press Ctrl+C to stop monitoring (trajectories keep running)${NC}"
   echo ""
 
@@ -1020,10 +1103,17 @@ cmd_monitor() {
   local status_b="running"
   local MAX_MONITOR_SECONDS=7200
 
+  local attach_hint_a="tmux attach -t $win_a"
+  local attach_hint_b="tmux attach -t $win_b"
+  if [ "$TMUX_LAYOUT" = "windows" ]; then
+    attach_hint_a="tmux select-window -t $win_a"
+    attach_hint_b="tmux select-window -t $win_b"
+  fi
+
   echo -e "  ${DIM}Timeout: $((MAX_MONITOR_SECONDS / 60)) minutes. Ctrl+C to stop early.${NC}"
-  echo -e "  ${YELLOW}IMPORTANT: Keep an eye on trajectory tmux sessions!${NC}"
+  echo -e "  ${YELLOW}IMPORTANT: Keep an eye on trajectory windows!${NC}"
   echo -e "  ${YELLOW}If a model asks for permission, you must approve it manually.${NC}"
-  echo -e "  ${DIM}Attach: tmux attach -t $sess_a  (or $sess_b)${NC}"
+  echo -e "  ${DIM}Attach: ${attach_hint_a}  (or ${attach_hint_b})${NC}"
   echo ""
 
   while true; do
@@ -1031,29 +1121,23 @@ cmd_monitor() {
       echo ""
       echo ""
       echo -e "  ${RED}TIMEOUT: Monitoring exceeded $((MAX_MONITOR_SECONDS / 60)) minutes.${NC}"
-      echo -e "  ${YELLOW}Check trajectory sessions manually:${NC}"
-      echo -e "    tmux attach -t $sess_a"
-      echo -e "    tmux attach -t $sess_b"
+      echo -e "  ${YELLOW}Check trajectory windows manually:${NC}"
+      echo -e "    ${attach_hint_a}"
+      echo -e "    ${attach_hint_b}"
       echo ""
       break
     fi
 
     local output_a="" output_b="" output_ctrl=""
 
-    if tmux has-session -t "$sess_a" 2>/dev/null; then
-      output_a=$(tmux capture-pane -t "$sess_a" -p -l 5 2>/dev/null || echo "")
+    # Capture from whatever layout is active
+    if [ "$TMUX_LAYOUT" != "none" ]; then
+      output_a=$(tmux capture-pane -t "$win_a" -p 2>/dev/null | tail -5 || echo "")
+      output_b=$(tmux capture-pane -t "$win_b" -p 2>/dev/null | tail -5 || echo "")
+      output_ctrl=$(tmux capture-pane -t "$win_ctrl" -p 2>/dev/null | tail -5 || echo "")
     else
       status_a="ended"
-    fi
-
-    if tmux has-session -t "$sess_b" 2>/dev/null; then
-      output_b=$(tmux capture-pane -t "$sess_b" -p -l 5 2>/dev/null || echo "")
-    else
       status_b="ended"
-    fi
-
-    if tmux has-session -t "$sess_ctrl" 2>/dev/null; then
-      output_ctrl=$(tmux capture-pane -t "$sess_ctrl" -p -l 5 2>/dev/null || echo "")
     fi
 
     # Detect completion and failure states
@@ -1099,10 +1183,10 @@ cmd_monitor() {
       echo ""
       echo -e "  ${YELLOW}*** A trajectory is waiting for your permission! ***${NC}"
       if [ "$a_waiting" = true ]; then
-        echo -e "  ${YELLOW}  Trajectory A: tmux attach -t $sess_a  (type 'y' + Enter)${NC}"
+        echo -e "  ${YELLOW}  Trajectory A: ${attach_hint_a}  (type 'y' + Enter)${NC}"
       fi
       if [ "$b_waiting" = true ]; then
-        echo -e "  ${YELLOW}  Trajectory B: tmux attach -t $sess_b  (type 'y' + Enter)${NC}"
+        echo -e "  ${YELLOW}  Trajectory B: ${attach_hint_b}  (type 'y' + Enter)${NC}"
       fi
     fi
 
@@ -1138,11 +1222,11 @@ cmd_monitor() {
       fi
       echo ""
 
-      echo -e "  Control: ${CYAN}tmux attach -t $sess_ctrl${NC}"
+      echo -e "  Control: ${CYAN}tmux attach -t $win_ctrl${NC}"
       echo ""
       echo -e "  Review trajectories:"
-      echo -e "    ${CYAN}tmux attach -t $sess_a${NC}"
-      echo -e "    ${CYAN}tmux attach -t $sess_b${NC}"
+      echo -e "    ${CYAN}tmux select-window -t $win_a${NC}"
+      echo -e "    ${CYAN}tmux select-window -t $win_b${NC}"
       echo ""
       printf '\a'
       break
@@ -1152,7 +1236,7 @@ cmd_monitor() {
       echo ""
       echo ""
       echo -e "  ${YELLOW}Both trajectory sessions have ended.${NC}"
-      echo -e "  Check control: ${CYAN}tmux attach -t $sess_ctrl${NC}"
+      echo -e "  Check control: ${CYAN}tmux attach -t $win_ctrl${NC}"
       break
     fi
 
@@ -1162,30 +1246,147 @@ cmd_monitor() {
 }
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# resolve_tmux_targets: Detect whether HFI is using windows-in-one-session
+# or separate sessions for trajectories, and return the correct tmux targets.
+#
+# HFI has two layouts depending on how it was launched:
+#   1. First launch (--tmux): single session {id} with windows :0, :1, :2
+#   2. After --continue relaunch: separate sessions {id}-A, {id}-B,
+#      control in the launcher wrapper session
+#
+# Sets these variables in the CALLER's scope (use eval):
+#   TMUX_CTRL  = target for the control pane
+#   TMUX_A     = target for trajectory A
+#   TMUX_B     = target for trajectory B
+#   TMUX_LAYOUT = "windows" or "sessions"
+# ---------------------------------------------------------------------------
+
+resolve_tmux_targets() {
+  local sid
+  sid=$(load_state session_id)
+  local launcher
+  launcher=$(load_state launcher_session)
+
+  # Check for windows-in-one-session layout first
+  if tmux has-session -t "$sid" 2>/dev/null; then
+    local win_count
+    win_count=$(tmux list-windows -t "$sid" -F '#{window_index}' 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$win_count" -ge 3 ]; then
+      TMUX_CTRL="${sid}:0"
+      TMUX_A="${sid}:1"
+      TMUX_B="${sid}:2"
+      TMUX_LAYOUT="windows"
+      return
+    fi
+  fi
+
+  # Check for separate sessions layout
+  if tmux has-session -t "${sid}-A" 2>/dev/null; then
+    TMUX_A="${sid}-A"
+    TMUX_B="${sid}-B"
+    # Control is in the launcher wrapper session
+    if [ -n "$launcher" ] && tmux has-session -t "$launcher" 2>/dev/null; then
+      TMUX_CTRL="${launcher}"
+    else
+      TMUX_CTRL="${sid}-A"
+    fi
+    TMUX_LAYOUT="sessions"
+    return
+  fi
+
+  # Nothing found
+  TMUX_CTRL=""
+  TMUX_A=""
+  TMUX_B=""
+  TMUX_LAYOUT="none"
+}
+
+# ---------------------------------------------------------------------------
 # capture-diffs: Extract diffs from A/B worktrees and save to files
 # ---------------------------------------------------------------------------
 
 find_worktree_dir() {
   local repo_path
   repo_path=$(load_state repo_path)
-  local project_name
-  project_name=$(basename "$repo_path")
+
+  # PRIORITY 1: Use the persisted worktree path from state.
+  # This was saved during launch or first successful resolution.
+  local saved_worktree
+  saved_worktree=$(load_state worktree_dir)
+  if [ -n "$saved_worktree" ] && [ -d "$saved_worktree/A" ] && [ -d "$saved_worktree/B" ]; then
+    echo "$saved_worktree"
+    return
+  fi
 
   local cache_base="$HOME/.cache/claude-hfi"
 
-  # Try exact project name first, then scan for matches
+  # PRIORITY 2: Exact encoded path.
+  # HFI encodes the full repo path by replacing "/" and "_" with "-".
+  # /Users/yashverma/marlin_tasks/tensorflow_89394
+  #   → -Users-yashverma-marlin-tasks-tensorflow-89394
+  local encoded_path
+  encoded_path=$(echo "$repo_path" | tr '/' '-' | tr '_' '-')
+
+  if [ -d "$cache_base/$encoded_path/A" ]; then
+    save_state "worktree_dir" "$cache_base/$encoded_path"
+    echo "$cache_base/$encoded_path"
+    return
+  fi
+
+  # PRIORITY 3: Basename match (simple project names).
+  local project_name
+  project_name=$(basename "$repo_path")
   if [ -d "$cache_base/$project_name/A" ]; then
+    save_state "worktree_dir" "$cache_base/$project_name"
     echo "$cache_base/$project_name"
     return
   fi
 
-  # Scan for any project with A/B subdirs
+  # PRIORITY 4: Scan for dirs matching the FULL basename pattern.
+  # We require the dir name to contain BOTH the project name AND the PR/issue
+  # number (if present). This prevents matching "tensorflow-111346" when we
+  # want "tensorflow-89394".
+  local basename_dashed
+  basename_dashed=$(basename "$repo_path" | tr '_' '-')
   for d in "$cache_base"/*/; do
     if [ -d "${d}A" ] && [ -d "${d}B" ]; then
-      echo "${d%/}"
-      return
+      local dirname
+      dirname=$(basename "$d")
+      if [[ "$dirname" == *"$basename_dashed"* ]]; then
+        save_state "worktree_dir" "${d%/}"
+        echo "${d%/}"
+        return
+      fi
     fi
   done
+
+  # PRIORITY 5: Cross-validate using HFI session metadata.
+  # /tmp/claude-hfi/{session_id}/pre-thread-survey.json has the repo_url.
+  local session_id
+  session_id=$(load_state session_id)
+  if [ -n "$session_id" ] && [ -n "$repo_path" ]; then
+    local survey="/tmp/claude-hfi/${session_id}/pre-thread-survey.json"
+    if [ ! -f "$survey" ]; then
+      survey="${TMPDIR:-/tmp}claude-hfi/${session_id}/pre-thread-survey.json"
+    fi
+    if [ -f "$survey" ]; then
+      local repo_basename
+      repo_basename=$(basename "$repo_path" | tr '_' '-')
+      for d in "$cache_base"/*/; do
+        if [ -d "${d}A" ] && [ -d "${d}B" ]; then
+          local dirname
+          dirname=$(basename "$d")
+          if echo "$dirname" | grep -qi "$(echo "$repo_basename" | cut -d'-' -f1)"; then
+            echo -e "  ${YELLOW}WARN: Loose match on '${dirname}' -- validate manually${NC}" >&2
+            save_state "worktree_dir" "${d%/}"
+            echo "${d%/}"
+            return
+          fi
+        fi
+      done
+    fi
+  fi
 
   echo ""
 }
@@ -1295,27 +1496,36 @@ cmd_capture_traces() {
   echo -e "${BOLD}CAPTURE TRACES -- Turn $turn_num${NC}"
   echo -e "${YELLOW}------------------------------------------------------------${NC}"
 
-  local sess_a="${session_id}-A"
-  local sess_b="${session_id}-B"
+  resolve_tmux_targets
+  local target_a="$TMUX_A"
+  local target_b="$TMUX_B"
 
+  if [ "$TMUX_LAYOUT" = "none" ]; then
+    echo -e "  ${YELLOW}No tmux sessions found for ${session_id}${NC}"
+    echo -e "  ${DIM}Tried windows layout (${session_id}:1/:2) and separate sessions (${session_id}-A/-B)${NC}"
+    echo -e "  ${DIM}Make sure HFI is still running. Check: tmux ls${NC}"
+    return 1
+  fi
+
+  echo -e "  Layout: ${CYAN}${TMUX_LAYOUT}${NC}  (A=${target_a}, B=${target_b})"
   mkdir -p "$STATE_DIR"
 
-  if tmux has-session -t "$sess_a" 2>/dev/null; then
-    tmux capture-pane -t "$sess_a" -p -S -500 > "$STATE_DIR/turn${turn_num}_trace_A.txt" 2>&1
+  # Capture Trajectory A
+  if tmux capture-pane -t "$target_a" -p -S -5000 > "$STATE_DIR/turn${turn_num}_trace_A.txt" 2>&1; then
     local lines_a
     lines_a=$(wc -l < "$STATE_DIR/turn${turn_num}_trace_A.txt" | tr -d ' ')
     echo -e "  ${GREEN}ok${NC} Trajectory A trace: $lines_a lines -> data/turn${turn_num}_trace_A.txt"
   else
-    echo -e "  ${YELLOW}Trajectory A session not found (${sess_a})${NC}"
+    echo -e "  ${YELLOW}Could not capture Trajectory A (${target_a})${NC}"
   fi
 
-  if tmux has-session -t "$sess_b" 2>/dev/null; then
-    tmux capture-pane -t "$sess_b" -p -S -500 > "$STATE_DIR/turn${turn_num}_trace_B.txt" 2>&1
+  # Capture Trajectory B
+  if tmux capture-pane -t "$target_b" -p -S -5000 > "$STATE_DIR/turn${turn_num}_trace_B.txt" 2>&1; then
     local lines_b
     lines_b=$(wc -l < "$STATE_DIR/turn${turn_num}_trace_B.txt" | tr -d ' ')
     echo -e "  ${GREEN}ok${NC} Trajectory B trace: $lines_b lines -> data/turn${turn_num}_trace_B.txt"
   else
-    echo -e "  ${YELLOW}Trajectory B session not found (${sess_b})${NC}"
+    echo -e "  ${YELLOW}Could not capture Trajectory B (${target_b})${NC}"
   fi
 
   echo ""
@@ -1688,9 +1898,12 @@ cmd_select_winner() {
   echo ""
 
   if [ -n "$session_id" ]; then
-    local launcher_session
-    launcher_session=$(load_state launcher_session)
-    echo -e "  Attach to control:  ${CYAN}tmux attach -t ${launcher_session:-${session_id}-control}${NC}"
+    resolve_tmux_targets
+    if [ "$TMUX_LAYOUT" != "none" ]; then
+      echo -e "  Attach to control:  ${CYAN}tmux attach -t ${TMUX_CTRL}${NC}"
+    else
+      echo -e "  ${DIM}No active tmux session found. Run 'status' to check.${NC}"
+    fi
     echo ""
   fi
 
@@ -1826,7 +2039,8 @@ cmd_fill_feedback() {
   local feedback_file="${1:-}"
   local launcher_session="${2:-}"
 
-  if [ -z "$feedback_file" ] || [ ! -f "$feedback_file" ]; then
+  # Resolve feedback file path (same logic as cmd_inject to avoid CWD issues)
+  if [ -z "$feedback_file" ]; then
     echo "  Usage: $0 fill-feedback <feedback-file> [launcher-session]"
     echo ""
     echo "  The feedback file uses ::SECTION:: delimiters."
@@ -1834,41 +2048,58 @@ cmd_fill_feedback() {
     exit 1
   fi
 
+  if [ ! -f "$feedback_file" ]; then
+    if [ -f "${SCRIPT_DIR}/${feedback_file}" ]; then
+      feedback_file="${SCRIPT_DIR}/${feedback_file}"
+    elif [ -f "${SCRIPT_DIR}/../${feedback_file}" ]; then
+      feedback_file="${SCRIPT_DIR}/../${feedback_file}"
+    else
+      echo -e "  ${RED}File not found: $feedback_file${NC}"
+      echo -e "  ${RED}  Also tried: ${SCRIPT_DIR}/${feedback_file}${NC}"
+      echo -e "  ${RED}  Also tried: ${SCRIPT_DIR}/../${feedback_file}${NC}"
+      exit 1
+    fi
+  fi
+
   if [ -z "$launcher_session" ]; then
     launcher_session=$(load_state launcher_session)
   fi
 
-  if [ -z "$launcher_session" ]; then
-    echo -e "  ${RED}No launcher session found.${NC}"
-    echo -e "  ${DIM}Pass it as 2nd arg or set via: save_state launcher_session <name>${NC}"
-    exit 1
-  fi
+  # Use resolve_tmux_targets for robust control pane detection
+  resolve_tmux_targets
+  local ctrl_target="$TMUX_CTRL"
 
-  if ! tmux has-session -t "$launcher_session" 2>/dev/null; then
-    echo -e "  ${RED}Session '$launcher_session' not found.${NC}"
-    tmux ls 2>/dev/null || echo "  (no tmux sessions)"
-    exit 1
+  if [ "$TMUX_LAYOUT" = "none" ]; then
+    # Fall back to explicit launcher_session if provided
+    if [ -n "$launcher_session" ] && tmux has-session -t "$launcher_session" 2>/dev/null; then
+      ctrl_target="${launcher_session}"
+    else
+      echo -e "  ${RED}No active HFI session found.${NC}"
+      echo -e "  ${DIM}Tried auto-detection and launcher_session='${launcher_session}'.${NC}"
+      tmux ls 2>/dev/null || echo "  (no tmux sessions)"
+      exit 1
+    fi
   fi
 
   echo -e "${BOLD}FILL FEEDBACK FORM (automated)${NC}"
   echo -e "${YELLOW}------------------------------------------------------------${NC}"
   echo -e "  File:    ${BOLD}$feedback_file${NC}"
-  echo -e "  Session: ${BOLD}$launcher_session${NC}"
+  echo -e "  Control: ${BOLD}$ctrl_target${NC} (layout: $TMUX_LAYOUT)"
   echo ""
 
   # Save a timestamped backup of the feedback file for audit trail
   local backup_name
   backup_name="feedback_$(date +%Y%m%d_%H%M%S)_$(basename "$feedback_file")"
   cp "$feedback_file" "$STATE_DIR/$backup_name" 2>/dev/null
-  audit_log "fill-feedback-start" "file=$feedback_file backup=$backup_name session=$launcher_session"
+  audit_log "fill-feedback-start" "file=$feedback_file backup=$backup_name ctrl=$ctrl_target"
 
   # Capture screen BEFORE filling to verify we're on the feedback form
   local pre_screen
-  pre_screen=$(tmux capture-pane -t "$launcher_session" -p 2>/dev/null || echo "")
+  pre_screen=$(tmux capture-pane -t "$ctrl_target" -p 2>/dev/null || echo "")
   if ! echo "$pre_screen" | grep -qi "senior engineer\|expectations\|feedback\|model A\|solution quality\|agency\|communication" 2>/dev/null; then
     echo -e "  ${YELLOW}WARNING: Feedback form may not be active on screen.${NC}"
     echo -e "  ${DIM}Screen content does not match expected form fields.${NC}"
-    echo -e "  ${DIM}Check: tmux attach -t $launcher_session${NC}"
+    echo -e "  ${DIM}Check: tmux attach -t ${ctrl_target}${NC}"
     echo ""
     echo -e "  ${BOLD}Continue anyway? (y/n)${NC}"
     read -r confirm
@@ -1881,6 +2112,7 @@ cmd_fill_feedback() {
   local current_section=""
   local section_text=""
   local key_axis_text=""
+  local top_3_axes=""
   local justification_text=""
   local action="continue"
   local senior_text=""
@@ -1904,6 +2136,7 @@ cmd_fill_feedback() {
       MODEL_B_AGENCY)           b_agency="$2" ;;
       MODEL_B_COMMUNICATION)    b_communication="$2" ;;
       KEY_AXIS)                 key_axis_text="$2" ;;
+      TOP_3_AXES)               top_3_axes="$2" ;;
       JUSTIFICATION)            justification_text="$2" ;;
       ACTION)                   action="$(echo "$2" | tr -d '[:space:]')" ;;
     esac
@@ -1942,7 +2175,7 @@ cmd_fill_feedback() {
     _save_section "$current_section" "$section_text"
   fi
 
-  local target="$launcher_session"
+  local target="$ctrl_target"
 
   # Field 1: Senior expectations
   echo -e "  [1/9] Filling: Senior expectations..."
@@ -1987,12 +2220,17 @@ cmd_fill_feedback() {
     tmux send-keys -t "$target" Tab; sleep 0.3
   done
 
-  # Overall preference scale
-  tmux_set_scale "$target" "$r_overall"
+  # Top 3 Axes text (comes before overall preference on the form)
+  echo -e "  [8.5/9] Filling: Top 3 Axes..."
+  if [ -n "$top_3_axes" ]; then
+    tmux_send_text "$target" "$top_3_axes"
+  else
+    tmux_send_text "$target" "$key_axis_text"
+  fi
   tmux send-keys -t "$target" Tab; sleep 0.5
 
-  # Key-axis text
-  tmux_send_text "$target" "$key_axis_text"
+  # Overall preference scale
+  tmux_set_scale "$target" "$r_overall"
   tmux send-keys -t "$target" Tab; sleep 0.5
 
   # Justification text
@@ -2045,6 +2283,8 @@ cmd_fill_feedback() {
 
     local diag_session_id
     diag_session_id=$(load_state session_id)
+    local current_turn
+    current_turn=$(load_state current_turn)
     local diag_session_dir=""
     local diag_tmpdir="${TMPDIR:-/tmp}"
     if [ -d "${diag_tmpdir}claude-hfi/${diag_session_id}" ]; then
@@ -2277,17 +2517,20 @@ cmd_next_turn() {
     fi
   fi
 
-  # Step 1: Kill the current launcher session
+  # Step 1: Kill all HFI sessions (both layouts)
   echo -e "  [1/4] Killing current HFI session..."
   if [ -n "$launcher_session" ]; then
     tmux kill-session -t "$launcher_session" 2>/dev/null || true
     echo -e "  ${GREEN}ok${NC} Killed session: $launcher_session"
-  else
-    echo -e "  ${DIM}No launcher session recorded -- killing all hfi-* sessions${NC}"
-    for sess in $(tmux ls -F '#{session_name}' 2>/dev/null | grep '^hfi-'); do
-      tmux kill-session -t "$sess" 2>/dev/null || true
-    done
   fi
+  # Kill the main session (windows layout) and trajectory sessions (sessions layout)
+  tmux kill-session -t "$session_id" 2>/dev/null || true
+  tmux kill-session -t "${session_id}-A" 2>/dev/null || true
+  tmux kill-session -t "${session_id}-B" 2>/dev/null || true
+  # Kill any other hfi-* wrapper sessions
+  for sess in $(tmux ls -F '#{session_name}' 2>/dev/null | grep '^hfi-' 2>/dev/null); do
+    tmux kill-session -t "$sess" 2>/dev/null || true
+  done
   sleep 2
 
   # Step 2: Relaunch via tmux new-session (proper TTY)
@@ -2687,22 +2930,25 @@ cmd_status() {
 
   if [ -n "$session_id" ]; then
     echo -e "  Session:    ${GREEN}$session_id${NC}"
-    local launcher_session
-    launcher_session=$(load_state launcher_session)
-    # --tmux mode creates separate sessions: <id>-A and <id>-B
-    if [ -n "$launcher_session" ] && tmux has-session -t "$launcher_session" 2>/dev/null; then
-      echo -e "  Control:    ${GREEN}running${NC} ($launcher_session)"
+
+    resolve_tmux_targets
+    echo -e "  Layout:     ${CYAN}${TMUX_LAYOUT}${NC}"
+
+    if [ "$TMUX_LAYOUT" != "none" ]; then
+      echo -e "  Control:    ${GREEN}running${NC} (${TMUX_CTRL})"
+      if [ -n "$TMUX_A" ] && tmux has-session -t "${TMUX_A%%:*}" 2>/dev/null; then
+        echo -e "  Traj A:     ${GREEN}running${NC} (${TMUX_A})"
+      else
+        echo -e "  Traj A:     ${DIM}not running${NC}"
+      fi
+      if [ -n "$TMUX_B" ] && tmux has-session -t "${TMUX_B%%:*}" 2>/dev/null; then
+        echo -e "  Traj B:     ${GREEN}running${NC} (${TMUX_B})"
+      else
+        echo -e "  Traj B:     ${DIM}not running${NC}"
+      fi
     else
       echo -e "  Control:    ${RED}not running${NC}"
-    fi
-    if tmux has-session -t "${session_id}-A" 2>/dev/null; then
-      echo -e "  Traj A:     ${GREEN}running${NC} (${session_id}-A)"
-    else
       echo -e "  Traj A:     ${DIM}not running${NC}"
-    fi
-    if tmux has-session -t "${session_id}-B" 2>/dev/null; then
-      echo -e "  Traj B:     ${GREEN}running${NC} (${session_id}-B)"
-    else
       echo -e "  Traj B:     ${DIM}not running${NC}"
     fi
   else
@@ -2754,24 +3000,26 @@ cmd_diagnose() {
   echo -e "  Current turn:    ${current_turn:-${RED}NOT SET${NC}}"
   echo ""
 
-  # Check tmux sessions
+  # Check tmux sessions using the universal resolver
   echo -e "  ${BOLD}2. tmux Sessions${NC}"
-  if [ -n "$launcher_session" ] && tmux has-session -t "$launcher_session" 2>/dev/null; then
-    echo -e "  Control:         ${GREEN}ALIVE${NC} ($launcher_session)"
-  else
-    echo -e "  Control:         ${RED}DEAD${NC} ($launcher_session)"
-  fi
-  if [ -n "$session_id" ]; then
-    if tmux has-session -t "${session_id}-A" 2>/dev/null; then
-      echo -e "  Trajectory A:    ${GREEN}ALIVE${NC} (${session_id}-A)"
+  resolve_tmux_targets
+  echo -e "  Layout:          ${CYAN}${TMUX_LAYOUT}${NC}"
+  if [ "$TMUX_LAYOUT" != "none" ]; then
+    echo -e "  Control:         ${GREEN}ALIVE${NC} (${TMUX_CTRL})"
+    if tmux has-session -t "${TMUX_A%%:*}" 2>/dev/null; then
+      echo -e "  Trajectory A:    ${GREEN}ALIVE${NC} (${TMUX_A})"
     else
       echo -e "  Trajectory A:    ${RED}DEAD${NC}"
     fi
-    if tmux has-session -t "${session_id}-B" 2>/dev/null; then
-      echo -e "  Trajectory B:    ${GREEN}ALIVE${NC} (${session_id}-B)"
+    if tmux has-session -t "${TMUX_B%%:*}" 2>/dev/null; then
+      echo -e "  Trajectory B:    ${GREEN}ALIVE${NC} (${TMUX_B})"
     else
       echo -e "  Trajectory B:    ${RED}DEAD${NC}"
     fi
+  else
+    echo -e "  Control:         ${RED}DEAD${NC} (no tmux sessions found)"
+    echo -e "  Trajectory A:    ${RED}DEAD${NC}"
+    echo -e "  Trajectory B:    ${RED}DEAD${NC}"
   fi
   echo ""
 
@@ -2992,13 +3240,19 @@ cmd_retry_turn() {
   echo -e "${YELLOW}------------------------------------------------------------${NC}"
   echo ""
 
-  # Step 1: Kill existing HFI
+  # Step 1: Kill existing HFI (both layouts)
   echo -e "  [1/4] Killing existing HFI sessions..."
   local launcher_session
   launcher_session=$(load_state launcher_session)
   if [ -n "$launcher_session" ]; then
     tmux kill-session -t "$launcher_session" 2>/dev/null || true
   fi
+  # Kill the main session (windows layout)
+  tmux kill-session -t "$session_id" 2>/dev/null || true
+  # Kill separate trajectory sessions (sessions layout from previous retry)
+  tmux kill-session -t "${session_id}-A" 2>/dev/null || true
+  tmux kill-session -t "${session_id}-B" 2>/dev/null || true
+  # Kill any hfi-* wrapper sessions
   for sess in $(tmux ls -F '#{session_name}' 2>/dev/null | grep '^hfi-' 2>/dev/null); do
     tmux kill-session -t "$sess" 2>/dev/null || true
   done
@@ -3073,6 +3327,210 @@ cmd_retry_turn() {
   echo -e "       ${CYAN}bash $0 monitor${NC}"
   echo -e "    4. Fill feedback:"
   echo -e "       ${CYAN}bash $0 fill-feedback data/turn${turn_num}_feedback.txt${NC}"
+  echo ""
+}
+
+# ---------------------------------------------------------------------------
+# archive-task: Archive current task data with timestamp and label
+# ---------------------------------------------------------------------------
+#
+# Creates: data/archive/YYYY-MM-DD_HHMMSS_<repo>_PR<number>/
+# Moves all task artifacts (diffs, traces, feedback, prompts, state, logs)
+# into the archive folder and resets state for the next task.
+#
+# Usage:
+#   bash hfi_orchestrator.sh archive-task [label]
+#   bash hfi_orchestrator.sh archive-task            # auto-labels from state
+#   bash hfi_orchestrator.sh archive-task "my_label"  # custom label
+# ---------------------------------------------------------------------------
+
+cmd_archive_task() {
+  local custom_label="${1:-}"
+
+  echo -e "${BOLD}ARCHIVE CURRENT TASK${NC}"
+  echo -e "${YELLOW}------------------------------------------------------------${NC}"
+
+  local timestamp
+  timestamp=$(date +%Y-%m-%d_%H%M%S)
+
+  # Build label from state if not provided
+  if [ -z "$custom_label" ]; then
+    local repo_path
+    repo_path=$(load_state repo_path)
+    local repo_name=""
+    if [ -n "$repo_path" ]; then
+      repo_name=$(basename "$repo_path" | sed 's/[^a-zA-Z0-9_-]/_/g')
+    fi
+
+    # Try to extract PR number from prompt prep files
+    local pr_num=""
+    for prep_file in "$STATE_DIR"/prompt_prep_pr*.md; do
+      if [ -f "$prep_file" ]; then
+        pr_num=$(basename "$prep_file" | sed 's/prompt_prep_pr\([0-9]*\)\.md/\1/')
+        break
+      fi
+    done
+
+    if [ -n "$repo_name" ] && [ -n "$pr_num" ]; then
+      custom_label="${repo_name}_PR${pr_num}"
+    elif [ -n "$repo_name" ]; then
+      custom_label="${repo_name}"
+    else
+      custom_label="task"
+    fi
+  fi
+
+  local archive_name="${timestamp}_${custom_label}"
+  local archive_dir="$STATE_DIR/archive/$archive_name"
+
+  mkdir -p "$archive_dir"
+
+  echo -e "  Archive: ${BOLD}data/archive/$archive_name/${NC}"
+  echo ""
+
+  # Collect all task artifacts
+  local moved=0
+
+  # Diffs
+  for f in "$STATE_DIR"/diff_*.patch "$STATE_DIR"/turn*_diff_*.txt; do
+    if [ -f "$f" ]; then
+      mv "$f" "$archive_dir/"
+      moved=$((moved + 1))
+    fi
+  done
+
+  # Traces
+  for f in "$STATE_DIR"/turn*_trace_*.txt "$STATE_DIR"/trace_*.txt; do
+    if [ -f "$f" ]; then
+      mv "$f" "$archive_dir/"
+      moved=$((moved + 1))
+    fi
+  done
+
+  # Feedback files
+  for f in "$STATE_DIR"/turn*_feedback.txt "$STATE_DIR"/feedback_*.txt; do
+    if [ -f "$f" ]; then
+      mv "$f" "$archive_dir/"
+      moved=$((moved + 1))
+    fi
+  done
+
+  # Prompts
+  for f in "$STATE_DIR"/turn*_prompt.txt; do
+    if [ -f "$f" ]; then
+      mv "$f" "$archive_dir/"
+      moved=$((moved + 1))
+    fi
+  done
+
+  # Comparisons and summaries
+  for f in "$STATE_DIR"/turn*_comparison.txt "$STATE_DIR"/turn*_summary.txt; do
+    if [ -f "$f" ]; then
+      mv "$f" "$archive_dir/"
+      moved=$((moved + 1))
+    fi
+  done
+
+  # Prompt prep files
+  for f in "$STATE_DIR"/prompt_prep_*.md; do
+    if [ -f "$f" ]; then
+      mv "$f" "$archive_dir/"
+      moved=$((moved + 1))
+    fi
+  done
+
+  # Evaluation
+  for f in "$STATE_DIR"/evaluation_*.md; do
+    if [ -f "$f" ]; then
+      mv "$f" "$archive_dir/"
+      moved=$((moved + 1))
+    fi
+  done
+
+  # Screen captures from feedback
+  for f in "$STATE_DIR"/feedback_screen_*.txt; do
+    if [ -f "$f" ]; then
+      mv "$f" "$archive_dir/"
+      moved=$((moved + 1))
+    fi
+  done
+
+  # State files (copy, then reset)
+  for f in "$STATE_DIR"/phase3_state.json "$STATE_DIR"/task_state.json; do
+    if [ -f "$f" ]; then
+      cp "$f" "$archive_dir/"
+      rm "$f"
+      moved=$((moved + 1))
+    fi
+  done
+
+  # Audit log (copy to archive, reset to empty)
+  if [ -f "$STATE_DIR/audit_log.jsonl" ]; then
+    cp "$STATE_DIR/audit_log.jsonl" "$archive_dir/"
+    : > "$STATE_DIR/audit_log.jsonl"
+    moved=$((moved + 1))
+  fi
+
+  # Move the HFI worktree cache into the archive so it doesn't pollute
+  # find_worktree_dir lookups in future tasks, but is still available
+  # if we need to re-check diffs/history for disputes or debugging.
+  local wt_dir
+  wt_dir=$(load_state worktree_dir)
+  if [ -z "$wt_dir" ] || [ ! -d "$wt_dir" ]; then
+    local repo_path_val
+    repo_path_val=$(load_state repo_path)
+    if [ -n "$repo_path_val" ]; then
+      local encoded
+      encoded=$(echo "$repo_path_val" | tr '/' '-' | tr '_' '-')
+      local cache_dir="$HOME/.cache/claude-hfi/$encoded"
+      if [ -d "$cache_dir" ]; then
+        wt_dir="$cache_dir"
+      fi
+    fi
+  fi
+  if [ -n "$wt_dir" ] && [ -d "$wt_dir" ]; then
+    mv "$wt_dir" "$archive_dir/hfi_worktrees"
+    echo -e "  ${GREEN}ok${NC} Moved HFI worktrees to archive: $(basename "$wt_dir")"
+    moved=$((moved + 1))
+  fi
+
+  # Write archive metadata
+  "$PYTHON" -c "
+import json, pathlib, datetime
+meta = {
+    'archived_at': datetime.datetime.now().isoformat(),
+    'label': '$custom_label',
+    'timestamp': '$timestamp',
+    'files_archived': $moved
+}
+pathlib.Path('$archive_dir/archive_meta.json').write_text(json.dumps(meta, indent=2))
+"
+
+  echo -e "  ${GREEN}ok${NC} Archived $moved files"
+  echo ""
+
+  # Show archive contents
+  echo -e "  ${DIM}Contents:${NC}"
+  ls "$archive_dir/" | sed 's/^/    /'
+  echo ""
+
+  # Show all archives
+  echo -e "  ${BOLD}All archived tasks:${NC}"
+  if [ -d "$STATE_DIR/archive" ]; then
+    for d in "$STATE_DIR/archive"/*/; do
+      if [ -d "$d" ]; then
+        local dir_name
+        dir_name=$(basename "$d")
+        local file_count
+        file_count=$(ls -1 "$d" 2>/dev/null | wc -l | tr -d ' ')
+        echo -e "    ${CYAN}$dir_name${NC} ($file_count files)"
+      fi
+    done
+  fi
+  echo ""
+
+  audit_log "archive-task" "archive=$archive_name files=$moved"
+  echo -e "  ${GREEN}State reset. Ready for new task.${NC}"
   echo ""
 }
 
@@ -3155,6 +3613,9 @@ case "$COMMAND" in
   audit|log)
     cmd_audit_show
     ;;
+  archive-task|archive)
+    cmd_archive_task "$@"
+    ;;
   *)
     echo "Usage: $0 <command> [args]"
     echo ""
@@ -3196,6 +3657,7 @@ case "$COMMAND" in
     echo "  task-status              Show task state machine progress"
     echo "  next-turn                Kill session, relaunch --continue (only if needed)"
     echo "  launch-hfi <repo> [--continue]  Launch HFI via tmux"
+    echo "  archive-task [label]     Archive current task data and reset state for next task"
     echo ""
     echo -e "${DIM}For full automation (Turns 2-3 + evaluation), say${NC}"
     echo -e "${DIM}\"automate the rest\" in Cursor after Turn 1 finishes.${NC}"

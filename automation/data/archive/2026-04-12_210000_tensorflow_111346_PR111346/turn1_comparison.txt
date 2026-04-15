@@ -1,0 +1,8 @@
+Turn 1 Comparison Report
+============================================================
+Files A: 8 | Files B: 8 | Shared: 7
+Only A: third_party/xla/xla/service/memory_space_assignment/options.cc
+Only B: third_party/xla/xla/service/memory_space_assignment/memory_space_assignment.cc
+Similarity: 50%
+Scope deviations A: third_party/xla/xla/service/memory_space_assignment/algorithm.cc, third_party/xla/xla/service/memory_space_assignment/algorithm.h, third_party/xla/xla/service/memory_space_assignment/allocation.cc, third_party/xla/xla/service/memory_space_assignment/allocation.h, third_party/xla/xla/service/memory_space_assignment/memory_space_assignment_test.cc, third_party/xla/xla/service/memory_space_assignment/options.cc, third_party/xla/xla/service/memory_space_assignment/options.h
+Scope deviations B: third_party/xla/xla/service/memory_space_assignment/algorithm.cc, third_party/xla/xla/service/memory_space_assignment/algorithm.h, third_party/xla/xla/service/memory_space_assignment/allocation.cc, third_party/xla/xla/service/memory_space_assignment/allocation.h, third_party/xla/xla/service/memory_space_assignment/memory_space_assignment.cc, third_party/xla/xla/service/memory_space_assignment/memory_space_assignment_test.cc, third_party/xla/xla/service/memory_space_assignment/options.h

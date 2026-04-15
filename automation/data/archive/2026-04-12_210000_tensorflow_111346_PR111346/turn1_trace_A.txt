@@ -1,0 +1,782 @@
+ ▐▛███▜▌   Claude Code v2.1.98
+▝▜█████▛▘  Opus 4.6 with high effort · API Usage Billing
+  ▘▘ ▝▝    ~/…/claude-hfi/-Users-yashverma-marlin-tasks-tensorflow-111346/A
+
+  Debug mode enabled
+  Logging to: /tmp/claude-hfi/94185c4f-5c87-415d-a343-d3099b4fd102/debug.txt
+
+⏺ Excellent. Now let me read the key sections of code that I'll need to modify
+  directly.
+
+  Read 3 files (ctrl+o to expand)
+
+⏺ Now let me read the verification logic and the eviction code path for
+  conditionals.
+
+  Read 2 files (ctrl+o to expand)
+
+⏺ Now let me look at how AllocateSegment handles conditional use allocation and
+  the required assignments.
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Now let me look at the AllocateAllocationValues function to understand the
+  conditional use flow and how the while-loop mirror/parent allocation is
+  triggered.
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Now let me find the key area where the conditional use processing calls the
+  while-loop mirror function and understand the complete flow.
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Now let me look at CanAllocateInAlternateMemory for conditionals more
+  carefully and the CreateAllocationRequest to understand how required
+  assignments get set.
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Now let me look at the MsaAlgorithm class header to find the method
+  declarations I'll need to add to.
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Let me also look at how MirroredAllocation::defining_position and ToString are
+   implemented.
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+⏺ Now let me design the plan using a Plan agent.
+
+⏺ Plan(Design implementation plan)
+  ⎿  Done (46 tool uses · 75.9k tokens · 3m 32s)
+  (ctrl+o to expand)
+
+⏺ Excellent. I have thorough understanding of the code and a detailed plan. Let
+  me read a few more critical sections to verify the plan, particularly the
+  CreateAllocationRequest section for conditionals.
+
+  Read 2 files (ctrl+o to expand)
+
+⏺ Good. Let me also check how options are serialized and look at one test
+  example more closely.
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+⏺ Let me also read the options.cc file to see the serialization pattern.
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Now let me read one of the existing conditional tests to understand the exact
+  assertion patterns.
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Now I have a thorough understanding. Let me write the final plan.
+
+⏺ Updated plan
+  ⎿  Error writing file
+
+  Read 1 file, listed 1 directory (ctrl+o to expand)
+
+⏺ Write(.claude/plans/effervescent-plotting-ripple.md)
+  ⎿  Wrote 96 lines to .claude/plans/effervescent-plotting-ripple.md
+      1 # Plan: Skip Unnecessary Conditional Operand Evictions in XLA MSA
+      2
+      3 ## Context
+      4
+      5 When a buffer sits in VMEM (alternate memory) and is passed into
+        a conditional, the MSA algorithm forces eviction back to HBM (def
+        ault memory) before the conditional runs, even if all branch comp
+        utations can read from alternate memory. This causes unnecessary
+        eviction+prefetch round trips that waste bandwidth.
+      6
+      7 The fix: detect when a conditional operand is already in alternat
+        e memory and all branches can use it directly, then skip eviction
+         and create mirrored allocations for the branch parameters pointi
+        ng at the same alternate memory chunk.
+      8
+      9 ## Changes
+     … +86 lines (ctrl+o to expand)
+
+⏺ Exited plan mode
+
+⏺ Let me start implementing the plan.
+
+⏺ Update(third_party/xla/xla/service/memory_space_assignment/options.h)
+  ⎿  Added 7 lines
+      332    // addition to alternate memory to eliminate redundant evict
+           ions.
+      333    bool enable_while_redundant_eviction_elimination = true;
+      334
+      335 +  // Enable redundant eviction optimization for conditional op
+          +erands. If
+      336 +  // enabled, when a buffer is already in alternate memory and
+          + all branches of a
+      337 +  // conditional can use it directly, the algorithm skips evic
+          +ting it to default
+      338 +  // memory and instead creates mirrored allocations for the b
+          +ranch parameters
+      339 +  // pointing at the same alternate memory chunk.
+      340 +  bool enable_conditional_redundant_eviction_elimination = fal
+          +se;
+      341 +
+      342    // An optional memory space assignment autotuning config, wh
+           ich is used
+      343    // to sort allocated buffers.
+      344    std::optional<std::vector<uint64_t>> autotuning_config = std
+           ::nullopt;
+
+⏺ Update(third_party/xla/xla/service/memory_space_assignment/options.cc)
+  ⎿  Added 2 lines
+      72                      cross_program_prefetch_permissive_mode),
+      73         absl::StrCat("enable_while_redundant_eviction_eliminatio
+          n: ",
+      74                      enable_while_redundant_eviction_elimination
+          ),
+      75 +       absl::StrCat("enable_conditional_redundant_eviction_elim
+         +ination: ",
+      76 +                    enable_conditional_redundant_eviction_elimi
+         +nation),
+      77         absl::StrCat("use_repeated_instance_for_preferred_prefet
+          ch_time: ",
+      78                      use_repeated_instance_for_preferred_prefetc
+          h_time),
+      79         absl::StrCat("enforce_prefetch_fifo_order: ",
+
+⏺ Update(third_party/xla/xla/service/memory_space_assignment/allocation.h)
+  ⎿  Added 7 lines, removed 5 lines
+      551    int64_t bytes_;
+      552  };
+      553
+      554 -// An allocation in the default memory space that mirrors anot
+          -her Allocation
+      555 -// object. This is useful to model an eviction that happens be
+          -fore a while op
+      556 -// so that we don't need to redundantly evict the buffer after
+          - the while op as
+      557 -// well.
+      554 +// An allocation that mirrors another Allocation object. When
+          +used with default
+      555 +// memory, this models an eviction before a while op to avoid
+          +redundant
+      556 +// evictions. When used with alternate memory, this models a c
+          +onditional branch
+      557 +// parameter that points at the same alternate memory chunk as
+          + the original
+      558 +// allocation, avoiding unnecessary eviction of conditional op
+          +erands.
+      559  class MirroredAllocation final : public Allocation {
+      560   public:
+      560 -  MirroredAllocation(const Allocation& original_allocation, in
+          -t64_t time);
+      561 +  MirroredAllocation(const Allocation& original_allocation, in
+          +t64_t time,
+      562 +                     MemorySpace memory_space = MemorySpace::k
+          +Default);
+      563
+      564    // Overridden methods
+      565    //
+
+⏺ Update(third_party/xla/xla/service/memory_space_assignment/allocation.cc)
+  ⎿  Added 3 lines, removed 2 lines
+      851  }
+      852
+      853  MirroredAllocation::MirroredAllocation(const Allocation& origi
+           nal_allocation,
+      854 -                                       int64_t time)
+      855 -    : Allocation(original_allocation.defining_position(), Memo
+          -rySpace::kDefault,
+      854 +                                       int64_t time,
+      855 +                                       MemorySpace memory_spac
+          +e)
+      856 +    : Allocation(original_allocation.defining_position(), memo
+          +ry_space,
+      857                   original_allocation.maybe_chunk(),
+      858                   /*start_time=*/time,
+      859                   /*end_time=*/time,
+
+⏺ Now let me add the helper function and the new method declarations to
+  algorithm.h.
+
+⏺ Update(third_party/xla/xla/service/memory_space_assignment/algorithm.h)
+  ⎿  Added 17 lines
+      764        absl::flat_hash_map<const HloComputation*, AliasedOffset
+           *>&
+      765            preferred_offset_for_computation);
+      766
+      767 +  // Returns true if all branches of a conditional can accommo
+          +date the operand
+      768 +  // in alternate memory without needing a copy. This is used
+          +to decide whether
+      769 +  // to skip eviction of conditional operands that are already
+          + in alternate
+      770 +  // memory.
+      771 +  bool AllConditionalBranchesCanUseAlternateMem(
+      772 +      const AllocationValue& value, const AllocationValue::Use
+          +& use) const;
+      773 +
+      774 +  // For conditional uses where the operand is already in alte
+          +rnate memory and
+      775 +  // all branches can use it directly, create mirrored allocat
+          +ions for the
+      776 +  // branch parameters pointing at the same alternate memory c
+          +hunk. This avoids
+      777 +  // unnecessary eviction and prefetch round trips.
+      778 +  void MaybeCreateMirroredAllocationForConditionalUse(
+      779 +      const AllocationValue& allocation_value, const Allocatio
+          +nValue::Use& use,
+      780 +      int64_t use_time, absl::Span<AllocationValue> allocation
+          +_values,
+      781 +      absl::flat_hash_map<const HloComputation*, AliasedOffset
+          +*>&
+      782 +          preferred_offset_for_computation);
+      783 +
+      784    // Creates a detailed memory allocation request for a given
+           use of an
+      785    // allocation value. Analyzes the usage pattern of the use t
+           o determine if it
+      786    // can be placed in alternate memory, considering the restri
+           ctions for loops
+
+⏺ Now let me add the AllConditionalBranchesCanUseAlternateMem implementation in
+  algorithm.cc, right after CanAllocateInAlternateMemory.
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Update(third_party/xla/xla/service/memory_space_assignment/algorithm.cc)
+  ⎿  Added 51 lines
+      910    return true;
+      911  }
+      912
+      913 +bool MsaAlgorithm::AllConditionalBranchesCanUseAlternateMem(
+      914 +    const AllocationValue& value, const AllocationValue::Use&
+          +use) const {
+      915 +  CHECK_EQ(use.hlo_use.instruction->opcode(), HloOpcode::kCond
+          +itional);
+      916 +  const auto& instruction_schedule = hlo_live_range_.instructi
+          +on_schedule();
+      917 +  int64_t conditional_time = instruction_schedule.at(use.hlo_u
+          +se.instruction);
+      918 +
+      919 +  // Collect all uses of this value that target the same condi
+          +tional.
+      920 +  bool all_branches_ok = true;
+      921 +  bool found_any_branch = false;
+      922 +  for (const AllocationValue::Use& other_use : value.uses()) {
+      923 +    if (other_use.hlo_use.instruction != use.hlo_use.instructi
+          +on) {
+      924 +      continue;
+      925 +    }
+      926 +    // Operand 0 is the predicate, not passed into branch comp
+          +utations.
+      927 +    if (other_use.hlo_use.operand_number == 0) {
+      928 +      continue;
+      929 +    }
+      930 +    found_any_branch = true;
+      931 +    HloComputation* called_computation =
+      932 +        use.hlo_use.instruction->called_computations().at(
+      933 +            other_use.hlo_use.operand_number - 1);
+      934 +    const HloInstruction* parameter_instruction =
+      935 +        called_computation->parameter_instruction(0);
+      936 +    HloValue* parameter_value =
+      937 +        &alias_analysis_.dataflow_analysis().GetUniqueValueAt(
+      938 +            parameter_instruction, other_use.hlo_use.operand_i
+          +ndex);
+      939 +    int64_t parameter_time = instruction_schedule.at(parameter
+          +_instruction);
+      940 +    int64_t min_use_time = conditional_time;
+      941 +    for (const HloUse& parameter_use : parameter_value->GetUse
+          +s()) {
+      942 +      if (parameter_use.instruction->parent() == called_comput
+          +ation &&
+      943 +          parameter_use.instruction->opcode() !=
+      944 +              HloOpcode::kGetTupleElement &&
+      945 +          parameter_use.instruction->opcode() != HloOpcode::kT
+          +uple &&
+      946 +          parameter_use.instruction->opcode() != HloOpcode::kB
+          +itcast) {
+      947 +        min_use_time = std::min(min_use_time,
+      948 +                                instruction_schedule.at(
+      949 +                                    parameter_use.instruction)
+          +);
+      950 +      }
+      951 +    }
+      952 +    if (!options_.prefetch_interval_picker->CanAllocateInAlter
+          +nateMemoryNoCopy(
+      953 +            parameter_value->shape(), parameter_time, min_use_
+          +time)) {
+      954 +      VLOG(4) << "Conditional branch " << called_computation->
+          +name()
+      955 +              << " cannot use alternate memory (parameter_time
+          +="
+      956 +              << parameter_time << ", min_use_time=" << min_us
+          +e_time << ")";
+      957 +      all_branches_ok = false;
+      958 +      break;
+      959 +    }
+      960 +  }
+      961 +  return found_any_branch && all_branches_ok;
+      962 +}
+      963 +
+      964  namespace {
+      965  // Columns in buffer information:
+      966  // buffer_id: int. This value can be used to match the allocat
+           ion in
+
+⏺ Now let me add the MaybeCreateMirroredAllocationForConditionalUse
+  implementation after the while-loop version. Let me first re-read the area to
+  find the exact insertion point (line numbers shifted due to earlier edits).
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+⏺ Update(third_party/xla/xla/service/memory_space_assignment/algorithm.cc)
+  ⎿  Added 82 lines
+      4702        GetAliasedOffset(*aliased_allocation);
+      4703  }
+      4704
+      4705 +void MsaAlgorithm::MaybeCreateMirroredAllocationForConditiona
+           +lUse(
+      4706 +    const AllocationValue& allocation_value, const Allocation
+           +Value::Use& use,
+      4707 +    int64_t use_time, absl::Span<AllocationValue> allocation_
+           +values,
+      4708 +    absl::flat_hash_map<const HloComputation*, AliasedOffset*
+           +>&
+      4709 +        preferred_offset_for_computation) {
+      4710 +  const HloUse& hlo_use = use.hlo_use;
+      4711 +
+      4712 +  if (hlo_use.instruction->opcode() != HloOpcode::kConditiona
+           +l) {
+      4713 +    return;
+      4714 +  }
+      4715 +
+      4716 +  if (!options_.enable_conditional_redundant_eviction_elimina
+           +tion) {
+      4717 +    return;
+      4718 +  }
+      4719 +
+      4720 +  Allocation* aliased_allocation =
+      4721 +      GetLiveAllocationAt(*allocation_value.allocation_sequen
+           +ce(), use_time);
+      4722 +  if (aliased_allocation->memory_space() != MemorySpace::kAlt
+           +ernate) {
+      4723 +    return;
+      4724 +  }
+      4725 +
+      4726 +  if (!AllConditionalBranchesCanUseAlternateMem(allocation_va
+           +lue, use)) {
+      4727 +    VLOG(3) << "Not all conditional branches can use alternat
+           +e memory for "
+      4728 +            << allocation_value.ToShortString() << " at use "
+      4729 +            << hlo_use.ToString();
+      4730 +    return;
+      4731 +  }
+      4732 +
+      4733 +  VLOG(3) << "Creating mirrored allocations for conditional b
+           +ranches: "
+      4734 +          << allocation_value.ToShortString() << " at use "
+      4735 +          << hlo_use.ToString();
+      4736 +
+      4737 +  const auto& instruction_schedule = hlo_live_range_.instruct
+           +ion_schedule();
+      4738 +  AliasedOffset* aliased_offset = GetAliasedOffset(*aliased_a
+           +llocation);
+      4739 +
+      4740 +  // Create a mirrored allocation in alternate memory for eac
+           +h branch
+      4741 +  // computation's parameter.
+      4742 +  for (const AllocationValue::Use& other_use : allocation_val
+           +ue.uses()) {
+      4743 +    if (other_use.hlo_use.instruction != hlo_use.instruction)
+           + {
+      4744 +      continue;
+      4745 +    }
+      4746 +    // Operand 0 is the predicate, not passed into branch com
+           +putations.
+      4747 +    if (other_use.hlo_use.operand_number == 0) {
+      4748 +      continue;
+      4749 +    }
+      4750 +    HloComputation* called_computation =
+      4751 +        hlo_use.instruction->called_computations().at(
+      4752 +            other_use.hlo_use.operand_number - 1);
+      4753 +
+      4754 +    // Find the AllocationValue for the parameter in this bra
+           +nch computation.
+      4755 +    auto branch_alloc_value_it =
+      4756 +        absl::c_find_if(allocation_values, [&](const Allocati
+           +onValue& value) {
+      4757 +          return value.computation() == called_computation &&
+      4758 +                 value.defining_instruction()->opcode() ==
+      4759 +                     HloOpcode::kParameter;
+      4760 +        });
+      4761 +    if (branch_alloc_value_it == allocation_values.end()) {
+      4762 +      VLOG(3) << "Could not find branch allocation value for
+           +computation "
+      4763 +              << called_computation->name();
+      4764 +      continue;
+      4765 +    }
+      4766 +
+      4767 +    int64_t parameter_time = instruction_schedule.at(
+      4768 +        branch_alloc_value_it->defining_instruction());
+      4769 +
+      4770 +    branch_alloc_value_it->mutable_allocation_sequence()->pus
+           +h_back(
+      4771 +        std::make_unique<MirroredAllocation>(*aliased_allocat
+           +ion,
+      4772 +                                             parameter_time,
+      4773 +                                             MemorySpace::kAl
+           +ternate));
+      4774 +    VLOG(3) << "Created mirrored allocation in alternate memo
+           +ry for "
+      4775 +            << called_computation->name() << ": "
+      4776 +            << branch_alloc_value_it->allocation_sequence()
+      4777 +                   ->back()
+      4778 +                   ->ToString();
+      4779 +
+      4780 +    CreateOrAddToAliasedOffset(
+      4781 +        *branch_alloc_value_it->allocation_sequence()->back()
+           +, aliased_offset);
+      4782 +
+      4783 +    preferred_offset_for_computation[called_computation] = al
+           +iased_offset;
+      4784 +  }
+      4785 +}
+      4786 +
+      4787  bool operator<(const AsynchronousCopy& a, const AsynchronousC
+            opy& b) {
+      4788    return a.AsTuple() < b.AsTuple();
+      4789  }
+
+⏺ Now add the call site. Let me find the current line for
+  MaybeCreateMirroredParentAllocationForWhileUse.
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+⏺ Update(third_party/xla/xla/service/memory_space_assignment/algorithm.cc)
+  ⎿  Added 3 lines
+      4277        MaybeCreateMirroredParentAllocationForWhileUse(
+      4278            allocation_value_to_update, use, use_time, allocati
+            on_values,
+      4279            preferred_offset_for_computation);
+      4280 +      MaybeCreateMirroredAllocationForConditionalUse(
+      4281 +          allocation_value_to_update, use, use_time, allocati
+           +on_values,
+      4282 +          preferred_offset_for_computation);
+      4283      }
+      4284    }
+      4285
+
+⏺ Now let me modify CreateAllocationRequest to skip forcing eviction when the
+  optimization applies. Let me find the current line.
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+⏺ Update(third_party/xla/xla/service/memory_space_assignment/algorithm.cc)
+  ⎿  Added 20 lines, removed 8 lines
+      4450      // called computation. This means that if a conditional o
+            perator has an
+      4451      // alternate memory allocation, subsequent uses cannot us
+            e the same
+      4452      // alternate memory allocation in order not to clobber da
+            ta. So we force
+      4453 -    // default memory allocation for these subsequent uses.
+      4453 +    // default memory allocation for these subsequent uses --
+           + unless the
+      4454 +    // conditional redundant eviction elimination optimizatio
+           +n is enabled and
+      4455 +    // all branches can directly use the buffer from alternat
+           +e memory.
+      4456      if (previous_use->hlo_use.instruction->opcode() ==
+      4457              HloOpcode::kConditional &&
+      4458          previous_use->hlo_use.instruction != hlo_use.instruct
+            ion) {
+      4457 -      allow_no_copy_alternate_mem_allocation = false;
+      4458 -      earliest_prefetch_time =
+      4459 -          instruction_schedule.at(previous_use->hlo_use.instr
+           -uction);
+      4460 -      VLOG(3) << "Previous use (" << previous_use->hlo_use.To
+           -String()
+      4461 -              << ") of use (" << hlo_use.ToString()
+      4462 -              << ") is a conditional, so this use will need t
+           -o evict. "
+      4463 -              << "Earliest prefetch time = " << *earliest_pre
+           -fetch_time;
+      4459 +      bool can_skip_eviction =
+      4460 +          options_.enable_conditional_redundant_eviction_elim
+           +ination &&
+      4461 +          AllConditionalBranchesCanUseAlternateMem(allocation
+           +_value,
+      4462 +                                                   *previous_
+           +use);
+      4463 +      if (!can_skip_eviction) {
+      4464 +        allow_no_copy_alternate_mem_allocation = false;
+      4465 +        earliest_prefetch_time =
+      4466 +            instruction_schedule.at(previous_use->hlo_use.ins
+           +truction);
+      4467 +        VLOG(3) << "Previous use (" << previous_use->hlo_use.
+           +ToString()
+      4468 +                << ") of use (" << hlo_use.ToString()
+      4469 +                << ") is a conditional, so this use will need
+           + to evict. "
+      4470 +                << "Earliest prefetch time = " << *earliest_p
+           +refetch_time;
+      4471 +      } else {
+      4472 +        VLOG(3) << "Previous use (" << previous_use->hlo_use.
+           +ToString()
+      4473 +                << ") is a conditional but all branches can u
+           +se alternate "
+      4474 +                << "memory. Skipping eviction for use ("
+      4475 +                << hlo_use.ToString() << ").";
+      4476      }
+      4477    }
+      4478
+
+⏺ Now I need to check that the closing braces are correct. Let me read around
+  that area.
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ The braces are wrong. The original code had } for the inner if and } for the
+  outer if/else if. Now with the added else branch, I need to close the if/else
+  and the outer if. Let me fix this.
+
+⏺ Update(third_party/xla/xla/service/memory_space_assignment/algorithm.cc)
+  ⎿  Added 1 line
+      4473                  << ") is a conditional but all branches can u
+            se alternate "
+      4474                  << "memory. Skipping eviction for use ("
+      4475                  << hlo_use.ToString() << ").";
+      4476 +      }
+      4477      }
+      4478    }
+      4479
+
+⏺ Now let me add the tests. Let me find a good insertion point at the end of the
+   conditional test section.
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+⏺ I'll insert the new tests right before the closing }  // namespace block.
+
+⏺ Update(third_party/xla/xla/service/memory_space_assignment/memory_space_assign
+        ment_test.cc)
+  ⎿  Added 121 lines
+      17286        kAlternateMemorySpace);
+      17287  }
+      17288
+      17289 +TEST_F(MemorySpaceAssignmentTest,
+      17290 +       ConditionalRedundantEvictionEliminationHappyPath) {
+      17291 +  // When enable_conditional_redundant_eviction_elimination
+            +is true and all
+      17292 +  // branches have short computations, the buffer should sta
+            +y in alternate
+      17293 +  // memory through the conditional without eviction.
+      17294 +  absl::string_view hlo_string = R"hlo(
+      17295 +  HloModule CondEvictElim, is_scheduled=true
+      17296 +
+      17297 +  true_computation {
+      17298 +    p0 = (f32[3]{0}) parameter(0)
+      17299 +    gte = f32[3]{0} get-tuple-element(p0), index=0
+      17300 +    ROOT neg1 = f32[3]{0} negate(gte)
+      17301 +  }
+      17302 +
+      17303 +  false_computation {
+      17304 +    p0 = (f32[3]{0}) parameter(0)
+      17305 +    gte = f32[3]{0} get-tuple-element(p0), index=0
+      17306 +    ROOT neg2 = f32[3]{0} negate(gte)
+      17307 +  }
+      17308 +
+      17309 +  ENTRY entry {
+      17310 +    p0 = f32[3]{0} parameter(0)
+      17311 +    p1 = pred[] parameter(1)
+      17312 +    copy = f32[3]{0} copy(p0)
+      17313 +    negate0 = f32[3]{0} negate(copy)
+      17314 +    tuple0 = (f32[3]{0}) tuple(negate0)
+      17315 +    tuple1 = (f32[3]{0}) tuple(negate0)
+      17316 +    conditional = f32[3]{0} conditional(p1, tuple0, tuple1),
+            + true_computation=true_computation, false_computation=false_
+            +computation
+      17317 +    ROOT add = f32[3]{0} add(negate0, conditional)
+      17318 +  }
+      17319 +  )hlo";
+      17320 +  TF_ASSERT_OK_AND_ASSIGN(auto module,
+      17321 +                          ParseAndReturnVerifiedModule(hlo_s
+            +tring));
+      17322 +  Options options = DefaultMemorySpaceOptions();
+      17323 +  options.enable_conditional_redundant_eviction_elimination
+            += true;
+      17324 +  AssignMemorySpace(module.get(), options);
+      17325 +
+      17326 +  // negate0 should stay in alternate memory (no eviction).
+      17327 +  auto negate0 =
+      17328 +      module->GetComputationWithName("entry")->GetInstructio
+            +nWithName(
+      17329 +          "negate0");
+      17330 +  EXPECT_EQ(negate0->shape().layout().memory_space(), kAlter
+            +nateMemorySpace);
+      17331 +
+      17332 +  // The add's first operand (negate0) should NOT be a copy-
+            +done, meaning no
+      17333 +  // eviction+prefetch happened.
+      17334 +  auto add =
+      17335 +      module->GetComputationWithName("entry")->GetInstructio
+            +nWithName("add");
+      17336 +  EXPECT_NE(add->operand(0)->opcode(), HloOpcode::kCopyDone)
+            +;
+      17337 +
+      17338 +  // Branch parameters should be in alternate memory.
+      17339 +  auto neg1 = module->GetComputationWithName("true_computati
+            +on")
+      17340 +                  ->GetInstructionWithName("neg1");
+      17341 +  EXPECT_EQ(neg1->operand(0)->shape().layout().memory_space(
+            +),
+      17342 +            kAlternateMemorySpace);
+      17343 +  auto neg2 = module->GetComputationWithName("false_computat
+            +ion")
+      17344 +                  ->GetInstructionWithName("neg2");
+      17345 +  EXPECT_EQ(neg2->operand(0)->shape().layout().memory_space(
+            +),
+      17346 +            kAlternateMemorySpace);
+      17347 +}
+      17348 +
+      17349 +TEST_F(MemorySpaceAssignmentTest,
+      17350 +       ConditionalRedundantEvictionEliminationFallback) {
+      17351 +  // When one branch has a long negate chain (parameter-to-f
+            +irst-use interval
+      17352 +  // too long for alternate memory), the optimization should
+            + not apply and
+      17353 +  // eviction should still happen.
+      17354 +  absl::string_view hlo_string = R"hlo(
+      17355 +  HloModule CondEvictElimFallback, is_scheduled=true
+      17356 +
+      17357 +  true_computation {
+      17358 +    p0 = (f32[3]{0}, f32[3]{0}) parameter(0)
+      17359 +    gte0 = f32[3]{0} get-tuple-element(p0), index=0
+      17360 +    neg0 = f32[3]{0} negate(gte0)
+      17361 +    neg1 = f32[3]{0} negate(neg0)
+      17362 +    neg2 = f32[3]{0} negate(neg1)
+      17363 +    neg3 = f32[3]{0} negate(neg2)
+      17364 +    neg4 = f32[3]{0} negate(neg3)
+      17365 +    neg5 = f32[3]{0} negate(neg4)
+      17366 +    neg6 = f32[3]{0} negate(neg5)
+      17367 +    neg7 = f32[3]{0} negate(neg6)
+      17368 +    neg8 = f32[3]{0} negate(neg7)
+      17369 +    neg9 = f32[3]{0} negate(neg8)
+      17370 +    gte1 = f32[3]{0} get-tuple-element(p0), index=1
+      17371 +    ROOT add0 = f32[3]{0} add(neg9, gte1)
+      17372 +  }
+      17373 +
+      17374 +  false_computation {
+      17375 +    p0 = (f32[3]{0}) parameter(0)
+      17376 +    gte = f32[3]{0} get-tuple-element(p0), index=0
+      17377 +    ROOT neg = f32[3]{0} negate(gte)
+      17378 +  }
+      17379 +
+      17380 +  ENTRY entry {
+      17381 +    p0 = f32[3]{0} parameter(0)
+      17382 +    p1 = pred[] parameter(1)
+      17383 +    copy0 = f32[3]{0} copy(p0)
+      17384 +    copy1 = f32[3]{0} copy(p0)
+      17385 +    tuple0 = (f32[3]{0}, f32[3]{0}) tuple(copy0, copy1)
+      17386 +    tuple1 = (f32[3]{0}) tuple(copy0)
+      17387 +    conditional = f32[3]{0} conditional(p1, tuple0, tuple1),
+            + true_computation=true_computation, false_computation=false_
+            +computation
+      17388 +    ROOT add1 = f32[3]{0} add(copy1, conditional)
+      17389 +  }
+      17390 +  )hlo";
+      17391 +  TF_ASSERT_OK_AND_ASSIGN(auto module,
+      17392 +                          ParseAndReturnVerifiedModule(hlo_s
+            +tring));
+      17393 +  Options options = DefaultMemorySpaceOptions();
+      17394 +  options.enable_conditional_redundant_eviction_elimination
+            += true;
+      17395 +  AssignMemorySpace(module.get(), options);
+      17396 +
+      17397 +  // copy1 should be in alternate memory initially.
+      17398 +  auto copy1 =
+      17399 +      module->GetComputationWithName("entry")->GetInstructio
+            +nWithName("copy1");
+      17400 +  EXPECT_EQ(copy1->shape().layout().memory_space(), kAlterna
+            +teMemorySpace);
+      17401 +  // But add1's first operand should be from default memory
+            +(eviction happened)
+      17402 +  // because the true_computation has a long negate chain th
+            +at prevents the
+      17403 +  // buffer from staying in alternate memory.
+      17404 +  auto add1 =
+      17405 +      module->GetComputationWithName("entry")->GetInstructio
+            +nWithName("add1");
+      17406 +  EXPECT_EQ(add1->operand(0)->shape().layout().memory_space(
+            +),
+      17407 +            kDefaultMemorySpace);
+      17408 +}
+      17409 +
+      17410  }  // namespace
+      17411  }  // namespace memory_space_assignment
+      17412  }  // namespace xla
+
+⏺ Now let me do a quick sanity check on the modified files to make sure
+  everything compiles logically. Let me verify the key code areas.
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Good, the braces are correct. Let me also verify the
+  MaybeCreateMirroredAllocationForConditionalUse implementation.
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+⏺ Good. Let me also verify the AllConditionalBranchesCanUseAlternateMem
+  implementation.
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Everything looks correct. Let me verify all the modified files are consistent
+  by checking the algorithm.h declarations.
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+⏺ Let me do a final check on the complete diff to make sure everything is
+  coherent.
+
+⏺ Bash(git diff --stat)
+  ⎿   .../service/memory_space_assignment/algorithm.cc   | 165 ++++++++++++
+     ++++++++-
+      .../service/memory_space_assignment/algorithm.h    |  17 +++
+     … +7 lines (ctrl+o to expand)
+
+⏺ All 7 files modified as planned. Here's a summary of the changes:
+
+  options.h / options.cc — Added
+  enable_conditional_redundant_eviction_elimination feature flag (defaults to
+  false).
+
+  allocation.h / allocation.cc — Extended MirroredAllocation constructor to
+  accept a MemorySpace parameter (defaults to kDefault for backward
+  compatibility). Updated the class comment to reflect its dual use for
+  while-loop and conditional scenarios.
+
+  algorithm.h / algorithm.cc — Three key changes:
+  1. AllConditionalBranchesCanUseAlternateMem — New helper that checks if ALL
+  branches of a conditional can accommodate the operand in alternate memory
+  (unlike the existing check which requires only ANY).
+  2. MaybeCreateMirroredAllocationForConditionalUse — Creates MirroredAllocation
+   in alternate memory for each branch parameter, registers them in the aliased
+  offset map, and sets preferred offsets. Called alongside the existing
+  while-loop version.
+  3. CreateAllocationRequest — When the flag is enabled and all branches can use
+   alternate memory, skips forcing allow_no_copy_alternate_mem_allocation =
+  false, so the buffer stays in VMEM without eviction.
+
+  memory_space_assignment_test.cc — Two new tests:
+  - Happy path: Both branches have short computations; buffer stays in alternate
+   memory through the conditional without eviction.
+  - Fallback: One branch has a long negate chain; eviction still happens as
+  expected.
+
+✳ Seasoning… (12m 21s · ↓ 42.5k tokens)
+  ⎿  Tip: Use /btw to ask a quick side question without interrupting Claude's
+     current work
+yashverma@yashs-MacBook-Pro A %

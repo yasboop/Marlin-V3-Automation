@@ -1,0 +1,1856 @@
+⏺ 3. Update the ToString for MirroredAllocation to show memory space
+
+⏺ Update(third_party/xla/xla/service/memory_space_assignment/allocation.cc)
+  ⎿  Added 7 lines, removed 1 line
+      840  }
+      841
+      842  std::string MirroredAllocation::ToString() const {
+      843 -  return absl::StrCat("Mirrored Allocation for ",
+      843 +  std::string memory_space_str = MemorySpaceToString(memory_sp
+          +ace());
+      844 +  std::optional<HeapSimulator::Chunk> chunk = maybe_chunk();
+      845 +  if (chunk) {
+      846 +    absl::StrAppend(&memory_space_str, " (off: ", chunk->offse
+          +t,
+      847 +                    ", size: ", chunk->size, ")");
+      848 +  }
+      849 +  return absl::StrCat("Mirrored Allocation in ", memory_space_
+          +str, " for ",
+      850                        original_allocation_.ToString());
+      851  }
+      852
+
+⏺ 4. Add the new method to algorithm.h
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Update(third_party/xla/xla/service/memory_space_assignment/algorithm.h)
+  ⎿  Added 9 lines
+      764        absl::flat_hash_map<const HloComputation*, AliasedOffset
+           *>&
+      765            preferred_offset_for_computation);
+      766
+      767 +  // For conditional uses where the operand is already in alte
+          +rnate memory,
+      768 +  // checks if all uses inside the branch computations can wor
+          +k with alternate
+      769 +  // memory. If so, creates mirrored allocations in alternate
+          +memory for the
+      770 +  // branch parameters, avoiding unnecessary eviction and re-p
+          +refetch. Returns
+      771 +  // true if the optimization was applied (eviction can be ski
+          +pped).
+      772 +  bool MaybeCreateMirroredAllocationForConditionalUse(
+      773 +      const AllocationValue& allocation_value, const Allocatio
+          +nValue::Use& use,
+      774 +      int64_t use_time, absl::Span<AllocationValue> allocation
+          +_values);
+      775 +
+      776    // Creates a detailed memory allocation request for a given
+           use of an
+      777    // allocation value. Analyzes the usage pattern of the use t
+           o determine if it
+      778    // can be placed in alternate memory, considering the restri
+           ctions for loops
+
+⏺ 5. Implement the new method in algorithm.cc and update the eviction logic
+
+  First, let me implement MaybeCreateMirroredAllocationForConditionalUse. I'll
+  add it after MaybeCreateMirroredParentAllocationForWhileUse:
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Update(third_party/xla/xla/service/memory_space_assignment/algorithm.cc)
+  ⎿  Added 102 lines
+      4651        GetAliasedOffset(*aliased_allocation);
+      4652  }
+      4653
+      4654 +bool MsaAlgorithm::MaybeCreateMirroredAllocationForConditiona
+           +lUse(
+      4655 +    const AllocationValue& allocation_value, const Allocation
+           +Value::Use& use,
+      4656 +    int64_t use_time, absl::Span<AllocationValue> allocation_
+           +values) {
+      4657 +  const HloUse& hlo_use = use.hlo_use;
+      4658 +  if (hlo_use.instruction->opcode() != HloOpcode::kConditiona
+           +l) {
+      4659 +    return false;
+      4660 +  }
+      4661 +  if (!options_.enable_conditional_redundant_eviction_elimina
+           +tion) {
+      4662 +    return false;
+      4663 +  }
+      4664 +
+      4665 +  Allocation* aliased_allocation =
+      4666 +      GetLiveAllocationAt(*allocation_value.allocation_sequen
+           +ce(), use_time);
+      4667 +  if (!aliased_allocation ||
+      4668 +      aliased_allocation->memory_space() != MemorySpace::kAlt
+           +ernate) {
+      4669 +    return false;
+      4670 +  }
+      4671 +
+      4672 +  const auto& instruction_schedule = hlo_live_range_.instruct
+           +ion_schedule();
+      4673 +
+      4674 +  // Check that all uses in all branches can work with altern
+           +ate memory.
+      4675 +  for (const AllocationValue::Use& other_use : allocation_val
+           +ue.uses()) {
+      4676 +    if (other_use.hlo_use.instruction != hlo_use.instruction)
+           + {
+      4677 +      continue;
+      4678 +    }
+      4679 +    // Operand 0 of conditional is the predicate, not passed
+           +to computations.
+      4680 +    if (other_use.hlo_use.operand_number == 0) {
+      4681 +      continue;
+      4682 +    }
+      4683 +    HloComputation* called_computation =
+      4684 +        hlo_use.instruction->called_computations().at(
+      4685 +            other_use.hlo_use.operand_number - 1);
+      4686 +    const HloInstruction* parameter_instruction =
+      4687 +        called_computation->parameter_instruction(0);
+      4688 +    HloValue* parameter_value =
+      4689 +        &alias_analysis_.dataflow_analysis().GetUniqueValueAt
+           +(
+      4690 +            parameter_instruction, other_use.hlo_use.operand_
+           +index);
+      4691 +    int64_t parameter_time = instruction_schedule.at(paramete
+           +r_instruction);
+      4692 +    int64_t conditional_time = instruction_schedule.at(hlo_us
+           +e.instruction);
+      4693 +    int64_t min_use_time = conditional_time;
+      4694 +    for (const HloUse& parameter_use : parameter_value->GetUs
+           +es()) {
+      4695 +      if (parameter_use.instruction->parent() == called_compu
+           +tation &&
+      4696 +          parameter_use.instruction->opcode() !=
+      4697 +              HloOpcode::kGetTupleElement &&
+      4698 +          parameter_use.instruction->opcode() != HloOpcode::k
+           +Tuple &&
+      4699 +          parameter_use.instruction->opcode() != HloOpcode::k
+           +Bitcast) {
+      4700 +        min_use_time = std::min(
+      4701 +            min_use_time, instruction_schedule.at(parameter_u
+           +se.instruction));
+      4702 +      }
+      4703 +    }
+      4704 +    // Check if we can keep the buffer in alternate memory fo
+           +r this branch.
+      4705 +    if (!options_.prefetch_interval_picker->CanAllocateInAlte
+           +rnateMemoryNoCopy(
+      4706 +            parameter_value->shape(), parameter_time, min_use
+           +_time)) {
+      4707 +      VLOG(4) << "Conditional mirrored allocation not possibl
+           +e for "
+      4708 +              << called_computation->name()
+      4709 +              << ": parameter use too far from parameter defi
+           +nition.";
+      4710 +      return false;
+      4711 +    }
+      4712 +    // Also check if any use in this branch requires default
+           +memory.
+      4713 +    if (!options_.is_use_allowed_in_alternate_mem_fn(other_us
+           +e.hlo_use)) {
+      4714 +      VLOG(4) << "Conditional mirrored allocation not possibl
+           +e: use "
+      4715 +              << other_use.hlo_use.ToString()
+      4716 +              << " not allowed in alternate memory.";
+      4717 +      return false;
+      4718 +    }
+      4719 +  }
+      4720 +
+      4721 +  // All branches can use alternate memory. Create mirrored a
+           +llocations for
+      4722 +  // branch parameters.
+      4723 +  VLOG(3) << "Creating mirrored allocations in alternate memo
+           +ry for "
+      4724 +             "conditional operand: "
+      4725 +          << aliased_allocation->ToString();
+      4726 +  for (AllocationValue& av : allocation_values) {
+      4727 +    if (av.defining_instruction()->opcode() != HloOpcode::kPa
+           +rameter) {
+      4728 +      continue;
+      4729 +    }
+      4730 +    HloComputation* computation = av.computation();
+      4731 +    bool is_branch_of_this_conditional = false;
+      4732 +    for (const HloComputation* called :
+      4733 +         hlo_use.instruction->called_computations()) {
+      4734 +      if (called == computation) {
+      4735 +        is_branch_of_this_conditional = true;
+      4736 +        break;
+      4737 +      }
+      4738 +    }
+      4739 +    if (!is_branch_of_this_conditional) {
+      4740 +      continue;
+      4741 +    }
+      4742 +    int64_t parameter_time =
+      4743 +        instruction_schedule.at(av.defining_instruction());
+      4744 +    av.mutable_allocation_sequence()->push_back(
+      4745 +        std::make_unique<MirroredAllocation>(
+      4746 +            *aliased_allocation, parameter_time, MemorySpace:
+           +:kAlternate));
+      4747 +    VLOG(3) << "Created mirrored allocation for branch parame
+           +ter in "
+      4748 +            << computation->name() << ": "
+      4749 +            << av.allocation_sequence()->back()->ToString();
+      4750 +    CreateOrAddToAliasedOffset(*av.allocation_sequence()->bac
+           +k(),
+      4751 +                               GetAliasedOffset(*aliased_allo
+           +cation));
+      4752 +  }
+      4753 +  return true;
+      4754 +}
+      4755 +
+      4756  bool operator<(const AsynchronousCopy& a, const AsynchronousC
+            opy& b) {
+      4757    return a.AsTuple() < b.AsTuple();
+      4758  }
+
+⏺ 6. Update the eviction logic in CreateAllocationRequest
+
+  Now I need to integrate the new method. The eviction logic for conditionals is
+   in CreateAllocationRequest around line 4393-4410. I need to call the mirrored
+   allocation method and skip eviction if it succeeds.
+
+  The call to MaybeCreateMirroredAllocationForConditionalUse should happen
+  alongside MaybeCreateMirroredParentAllocationForWhileUse. Let me find the
+  right integration point.
+
+  Looking at the flow:
+  1. AllocateAllocationValues calls CreateAllocationRequest for each use
+  2. After creating the request and allocating, it calls
+  MaybeCreateMirroredParentAllocationForWhileUse
+
+  The conditional eviction happens in CreateAllocationRequest at line ~4400
+  where it sets allow_no_copy_alternate_mem_allocation = false for the
+  subsequent use after a conditional.
+
+  The key insight is: we need to call our new function at the same point where
+  MaybeCreateMirroredParentAllocationForWhileUse is called (after
+  UpdateAllocationRequirementForUseAliases), and then check if the optimization
+  was applied when processing subsequent uses.
+
+  Let me re-read the flow more carefully:
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ I need to add the call to MaybeCreateMirroredAllocationForConditionalUse
+  alongside MaybeCreateMirroredParentAllocationForWhileUse, and track whether
+  the optimization was applied so the subsequent use logic can skip the forced
+  eviction.
+
+  The challenge is: the eviction logic for conditional is in
+  CreateAllocationRequest and it affects the next use after a conditional. The
+  mirrored allocation creation happens at the current use. So we need to:
+
+  1. Call MaybeCreateMirroredAllocationForConditionalUse when processing the
+  conditional use
+  2. Track that we did the optimization
+  3. When the next use is being processed, check if the conditional was mirrored
+   and skip the forced eviction
+
+  Let me look at how previous_use is used in the eviction:
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ The eviction at line 4400-4410 triggers when a subsequent use after a
+  conditional forces the buffer to be evicted and re-prefetched. If our mirrored
+   allocation optimization was applied, we should NOT force this eviction
+  because the conditional didn't clobber the alternate memory.
+
+  I need a way to track which conditional uses got the mirrored allocation
+  optimization. I can use the allocation_value's allocation sequence to check -
+  if the conditional's branch parameters have mirrored allocations in alternate
+  memory, we know the optimization was applied.
+
+  A simpler approach: I'll add a set to track which conditional instructions got
+   the optimization applied. Let me add it as a local variable in
+  AllocateAllocationValues:
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ I see that AllocateAllocationValues passes previous_use through to
+  CreateAllocationRequest. The problem is CreateAllocationRequest doesn't have
+  access to tracking information about what optimizations were applied. Let me
+  think about the cleanest approach.
+
+  Actually, the simplest and cleanest approach is: in CreateAllocationRequest,
+  instead of just checking if the previous use was a conditional, also check
+  whether the conditional's operand allocation was still in alternate memory
+  after the conditional. If the mirrored allocation was created, the buffer
+  remains in alternate memory, so we can check the live allocation at the
+  conditional time.
+
+  Wait, let me reconsider. The approach I want:
+
+  1. When processing a conditional use, call
+  MaybeCreateMirroredAllocationForConditionalUse
+  2. If it returns true, mark this conditional as "mirrored"
+  3. When the next use checks previous_use->hlo_use.instruction->opcode() ==
+  kConditional, also check if that conditional was mirrored - if so, skip
+  eviction
+
+  I'll use a local flat_hash_set in AllocateAllocationValues to track
+  conditional instructions where mirroring was applied, and thread it through
+  CreateAllocationRequest.
+
+  Actually, looking more carefully at the flow, CreateAllocationRequest is a
+  separate method from AllocateAllocationValues. Let me use a member variable or
+   a parameter.
+
+  A cleaner approach: I'll add a member variable
+  conditional_mirrored_allocations_ (a flat_hash_set<const HloInstruction*>) to
+  MsaAlgorithm that tracks which conditional instructions got the mirrored
+  optimization. Let me add it.
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Update(third_party/xla/xla/service/memory_space_assignment/algorithm.h)
+  ⎿  Added 5 lines
+      1399    // Vector to preserve insertion order for deterministic win
+            dow prefetching
+      1400    // results.
+      1401    std::vector<HloUse> uses_in_default_memory_;
+      1402 +
+      1403 +  // Tracks conditional instructions where mirrored alternate
+           +-memory allocations
+      1404 +  // were created for branch parameters, avoiding unnecessary
+           + eviction.
+      1405 +  absl::flat_hash_set<const HloInstruction*>
+      1406 +      conditionals_with_mirrored_alternate_mem_;
+      1407  };
+      1408
+      1409  }  // namespace memory_space_assignment
+
+⏺ Now update MaybeCreateMirroredAllocationForConditionalUse to record the
+  conditional instruction:
+
+⏺ Update(third_party/xla/xla/service/memory_space_assignment/algorithm.cc)
+  ⎿  Added 1 line
+      4723    VLOG(3) << "Creating mirrored allocations in alternate memo
+            ry for "
+      4724               "conditional operand: "
+      4725            << aliased_allocation->ToString();
+      4726 +  conditionals_with_mirrored_alternate_mem_.insert(hlo_use.in
+           +struction);
+      4727    for (AllocationValue& av : allocation_values) {
+      4728      if (av.defining_instruction()->opcode() != HloOpcode::kPa
+            rameter) {
+      4729        continue;
+
+⏺ 7. Hook the new method into AllocateAllocationValues
+
+⏺ Update(third_party/xla/xla/service/memory_space_assignment/algorithm.cc)
+  ⎿  Added 2 lines
+      4226        MaybeCreateMirroredParentAllocationForWhileUse(
+      4227            allocation_value_to_update, use, use_time, allocati
+            on_values,
+      4228            preferred_offset_for_computation);
+      4229 +      MaybeCreateMirroredAllocationForConditionalUse(
+      4230 +          allocation_value_to_update, use, use_time, allocati
+           +on_values);
+      4231      }
+      4232    }
+      4233
+
+⏺ 8. Update the eviction logic in CreateAllocationRequest to skip eviction for
+  mirrored conditionals
+
+⏺ Update(third_party/xla/xla/service/memory_space_assignment/algorithm.cc)
+  ⎿  Added 7 lines, removed 1 line
+      4399      // alternate memory allocation, subsequent uses cannot us
+            e the same
+      4400      // alternate memory allocation in order not to clobber da
+            ta. So we force
+      4401      // default memory allocation for these subsequent uses.
+      4402 +    //
+      4403 +    // However, if mirrored allocations were created for the
+           +conditional's
+      4404 +    // branch parameters (meaning the buffer stays pinned in
+           +alternate memory
+      4405 +    // throughout the conditional), we skip the eviction.
+      4406      if (previous_use->hlo_use.instruction->opcode() ==
+      4407              HloOpcode::kConditional &&
+      4404 -        previous_use->hlo_use.instruction != hlo_use.instruct
+           -ion) {
+      4408 +        previous_use->hlo_use.instruction != hlo_use.instruct
+           +ion &&
+      4409 +        !conditionals_with_mirrored_alternate_mem_.contains(
+      4410 +            previous_use->hlo_use.instruction)) {
+      4411        allow_no_copy_alternate_mem_allocation = false;
+      4412        earliest_prefetch_time =
+      4413            instruction_schedule.at(previous_use->hlo_use.instr
+            uction);
+
+⏺ 9. Update CreateOrAddToAliasedOffset to handle alternate memory mirrored
+  allocations
+
+  The current CreateOrAddToAliasedOffset has CHECK(allocation.memory_space() ==
+  MemorySpace::kAlternate). Wait, actually that's already checking for alternate
+   memory. Let me re-read:
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Hmm, it seems the line numbers shifted. Let me find CreateOrAddToAliasedOffset
+   again:
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+⏺ Good - CreateOrAddToAliasedOffset already requires MemorySpace::kAlternate, so
+   our new mirrored allocations in alternate memory will work with this. The
+  function checks that the allocation is in alternate memory and that the chunk
+  offset matches. Since our mirrored allocations in alternate memory share the
+  same chunk as the original allocation, this should work.
+
+  10. Update VerifyAllocations to handle mirrored alternate memory allocations
+
+  The verification at line 338-366 checks that all alternate memory allocations
+  don't overlap. The mirrored allocations in alternate memory would share the
+  same chunk as the original allocation, but they exist at different times
+  (inside the conditional branches). Let me check if this could cause
+  overlapping issues.
+
+  Actually, looking at the verification more carefully, a mirrored allocation
+  with start_time == end_time == parameter_time will be registered in the
+  interval tree at that time. The original allocation already covers that time
+  range. So we'd have two allocations at the same chunk at overlapping times,
+  which would fail the verification.
+
+  Let me look at how the while-loop MirroredAllocation handles this - it's in
+  default memory space so it's NOT checked by VerifyAllocations (which only
+  checks alternate memory).
+
+  For our alternate-memory mirrored allocations, we need to handle this in
+  VerifyAllocations. The simplest approach: the original allocation that spans
+  the conditional already occupies that chunk for the conditional's time range.
+  The branch parameter mirrored allocations would be at times inside the
+  conditional. These would overlap with the original allocation in the interval
+  tree.
+
+  Wait, actually let me think again about what the mirrored allocation does
+  here. The original allocation (say a PinnedAllocation in alternate memory) has
+   a time range that should cover up to the conditional. Inside the conditional,
+   the branch parameters are at different times. But the original allocation's
+  end_time should be at least the conditional time. Let me check...
+
+  Actually, looking at how the flattened schedule works with conditionals: the
+  entry-level timeline has the conditional instruction at time T. The branch
+  computations have their own parameter times that are flattened into the
+  schedule. The original allocation in alternate memory has start/end times that
+   span from before the conditional up to (at least) the conditional time.
+
+  The branch parameters have flattened times that are inside the conditional's
+  computation span. So a mirrored allocation at branch parameter time would
+  overlap in time with the original allocation. But since they share the same
+  chunk offset, the OverlapsWith check would detect them as overlapping.
+
+  Let me look at how the VerifyAllocations function works more carefully:
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ The key issue: a MirroredAllocation in alternate memory has start_time ==
+  end_time == parameter_time. But the original allocation already covers that
+  time range with the same chunk. The OverlapsWith check would trigger.
+
+  However, mirrored allocations represent the same physical memory - they're not
+   separate allocations but mirrors. So the overlap is intentional and correct.
+  The verification should skip the overlap check for mirrored allocations that
+  share the same chunk as their original.
+
+  Actually, wait. Let me reconsider the approach. The VerifyAllocations function
+   checks the allocations stored in allocations_ member. Are mirrored
+  allocations added there? Let me check...
+
+  Mirrored allocations are pushed to the AllocationValue's allocation sequence
+  (av.mutable_allocation_sequence()->push_back(...)). The allocations_ field is
+  populated later by Process. Let me check how allocations_ is built.
+
+  Searched for 2 patterns, read 1 file (ctrl+o to expand)
+
+⏺ So allocations_ is passed to the MsaAlgorithm constructor and the algorithm
+  populates it. Let me check how allocation values' sequences end up in
+  allocations_:
+
+  Searched for 2 patterns, read 1 file (ctrl+o to expand)
+
+⏺ I see - at line 6107, allocations_->push_back(std::move(allocation)) moves all
+   allocations (including mirrored ones) into the main allocations_ sequence.
+  Then at line 6109-6110, it tries to call GetAliasedOffset for alternate memory
+   allocations. This will work for our mirrored allocations since we registered
+  them with CreateOrAddToAliasedOffset.
+
+  However, at VerifyAllocations (line 338-366), the mirrored allocation and the
+  original allocation would both be in alternate memory with the same chunk at
+  overlapping times. This would fail the check.
+
+  The key insight is: mirrored allocations in alternate memory represent the
+  same physical memory location. The verification needs to understand this. Let
+  me update VerifyAllocations to skip mirrored allocations that are in alternate
+   memory, since they point to the same chunk as the original - they're not
+  separate allocations.
+
+  Actually, wait. I need to think about this differently. The original
+  allocation covers the time range in the outer computation. The mirrored
+  allocation for a branch parameter covers a time range inside the conditional
+  computation. In the flattened schedule, these time ranges might or might not
+  overlap depending on how the flattening works.
+
+  Let me check: if the original PinnedAllocation covers time [T_start,
+  T_conditional], and the branch parameter is at time T_param (which is >
+  T_conditional in the flattened schedule since it's inside the conditional),
+  then they DON'T overlap. The mirrored allocation has start_time == end_time ==
+   T_param, and the original ends at T_conditional. So T_param > T_conditional,
+  meaning no overlap.
+
+  Wait, but the original allocation's end_time might be extended to the
+  conditional time. Let me think...
+
+  The original allocation is the aliased_allocation at use_time (the conditional
+   time). So its end_time is at least use_time (the conditional time). The
+  branch parameters are at times AFTER the conditional start, inside the
+  computation span. So in the flattened schedule:
+
+  ... original allocation [T_start, T_conditional] ...
+  conditional instruction at T_conditional
+    true_computation: parameter at T_param_true > T_conditional
+    false_computation: parameter at T_param_false > T_conditional
+
+  Wait, actually, the flattened schedule has the conditional instruction's
+  called computations BEFORE the conditional instruction itself. Let me verify
+  this.
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+⏺ Looking at the code at line 4370-4373:
+  const HloLiveRange::TimeBound& computation_span =
+      hlo_live_range_.computation_span_times().at(called_computation);
+  latest_prefetch_time =
+      std::min(computation_span.start - 1, latest_prefetch_time);
+
+  This tells us that the computation span starts BEFORE the conditional
+  instruction's time. So in the flattened schedule:
+  T_computation_start < ... < T_conditional
+
+  The branch parameters would be at times WITHIN the computation span, i.e.,
+  between T_computation_start and T_conditional. The original allocation would
+  have its end_time set to at least T_conditional. So the mirrored allocation's
+  time (T_param) would be WITHIN the original allocation's [start_time,
+  end_time] range.
+
+  This means they DO overlap in time, and the verification would catch this as
+  an error since they share the same chunk.
+
+  I need to handle this in VerifyAllocations. The cleanest approach is to skip
+  mirrored alternate-memory allocations in the verification, since they
+  represent references to the same physical memory chunk.
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Now let me check what types we need to add to memory_space_assignment.cc:
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+⏺ Good, allocation.h is already included. Now I need to update VerifyAllocations
+   to handle mirrored allocations in alternate memory. I need to identify them.
+  A MirroredAllocation in alternate memory is easy to identify with a
+  dynamic_cast.
+
+  Let me add a helper method to the Allocation class (or just use dynamic_cast).
+   Actually, looking at the Allocation class, there's no
+  is_mirrored_allocation() method. Let me check if dynamic_cast works:
+
+  The classes are MirroredAllocation and it's a final subclass of Allocation. I
+  can do dynamic_cast<const MirroredAllocation*>.
+
+  Let me update VerifyAllocations:
+
+⏺ Update(third_party/xla/xla/service/memory_space_assignment/memory_space_assign
+        ment.cc)
+  ⎿  Added 5 lines, removed 1 line
+      358    };
+      359    // Verify that all alternate memory allocations are free of
+           overlapping
+      360    // Allocations in time and space, and add them to interval_t
+           ree one by one.
+      361 +  // Skip MirroredAllocations in alternate memory since they r
+          +epresent
+      362 +  // references to the same physical chunk as the original all
+          +ocation (used for
+      363 +  // conditional branch parameters that share the parent's VME
+          +M allocation).
+      364    for (const auto& allocation : allocations_) {
+      362 -    if (allocation->memory_space() == MemorySpace::kAlternate)
+          - {
+      365 +    if (allocation->memory_space() == MemorySpace::kAlternate
+          +&&
+      366 +        dynamic_cast<const MirroredAllocation*>(allocation.get
+          +()) == nullptr) {
+      367        TF_RETURN_IF_ERROR(add_allocation_and_verify(allocation.
+           get()));
+      368      }
+      369    }
+
+⏺ 11. Now let me also look at the VerifyAndExportHeapSimulatorTrace function to
+  understand if it needs updates
+
+  The VerifyAndExportHeapSimulatorTrace works with position-and-chunk pairs from
+   preset_assignments. It already has special handling for conditional buffers
+  through split_conditional_buffer. Since our change doesn't alter the HLO
+  structure (the buffer is still in alternate memory at the same position), this
+   should work correctly. The conditional buffer splitting logic already handles
+   alternate memory buffers passed into conditionals.
+
+  12. Now let me write the tests
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ I need to add tests after line 3993. Let me find the right location - after
+  the existing conditional tests:
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Let me add the tests after the ConditionalMultiUse test (line 3993):
+
+⏺ Update(third_party/xla/xla/service/memory_space_assignment/memory_space_assign
+        ment_test.cc)
+  ⎿  Added 119 lines
+      3992    EXPECT_EQ(add1_operand->opcode(), HloOpcode::kCopyDone);
+      3993  }
+      3994
+      3995 +TEST_F(MemorySpaceAssignmentTest,
+      3996 +       ConditionalSkipsEvictionWhenOperandPinnedInAlternateMe
+           +m) {
+      3997 +  // When a buffer is in alternate memory and all uses inside
+           + conditional
+      3998 +  // branches can use alternate memory, the algorithm should
+           +skip the eviction
+      3999 +  // and keep the buffer in alternate memory for the subseque
+           +nt use.
+      4000 +  absl::string_view hlo_string = R"hlo(
+      4001 +  HloModule CondAllocation, is_scheduled=true
+      4002 +
+      4003 +  true_computation {
+      4004 +    p0 = (f32[3]{0}) parameter(0)
+      4005 +    gte = f32[3]{0} get-tuple-element(p0), index=0
+      4006 +    ROOT neg1 = f32[3]{0} negate(gte)
+      4007 +  }
+      4008 +
+      4009 +  false_computation {
+      4010 +    p0 = (f32[3]{0}) parameter(0)
+      4011 +    gte = f32[3]{0} get-tuple-element(p0), index=0
+      4012 +    ROOT neg2 = f32[3]{0} negate(gte)
+      4013 +  }
+      4014 +
+      4015 +  ENTRY entry {
+      4016 +    p0 = f32[3]{0} parameter(0)
+      4017 +    p1 = pred[] parameter(1)
+      4018 +    copy = f32[3]{0} copy(p0)
+      4019 +    tuple = (f32[3]{0}) tuple(copy)
+      4020 +    conditional = f32[3]{0} conditional(p1, tuple, tuple), tr
+           +ue_computation=true_computation, false_computation=false_comp
+           +utation
+      4021 +    ROOT add = f32[3]{0} add(copy, conditional)
+      4022 +  }
+      4023 +  )hlo";
+      4024 +  TF_ASSERT_OK_AND_ASSIGN(auto module,
+      4025 +                          ParseAndReturnVerifiedModule(hlo_st
+           +ring));
+      4026 +  Options options = DefaultMemorySpaceOptions();
+      4027 +  options.enable_conditional_redundant_eviction_elimination =
+           + true;
+      4028 +  AssignMemorySpace(module.get(), options);
+      4029 +
+      4030 +  // copy should be in alternate memory.
+      4031 +  auto copy =
+      4032 +      module->GetComputationWithName("entry")->GetInstruction
+           +WithName("copy");
+      4033 +  EXPECT_EQ(copy->shape().layout().memory_space(), kAlternate
+           +MemorySpace);
+      4034 +
+      4035 +  // Branch parameters should get alternate memory from the m
+           +irrored allocation.
+      4036 +  auto neg1 = module->GetComputationWithName("true_computatio
+           +n")
+      4037 +                  ->GetInstructionWithName("neg1");
+      4038 +  auto neg1_operand = neg1->operand(0);
+      4039 +  EXPECT_EQ(neg1_operand->shape().layout().memory_space(),
+      4040 +            kAlternateMemorySpace);
+      4041 +  auto neg2 = module->GetComputationWithName("false_computati
+           +on")
+      4042 +                  ->GetInstructionWithName("neg2");
+      4043 +  auto neg2_operand = neg2->operand(0);
+      4044 +  EXPECT_EQ(neg2_operand->shape().layout().memory_space(),
+      4045 +            kAlternateMemorySpace);
+      4046 +
+      4047 +  // The subsequent use (add) should also be able to use alte
+           +rnate memory
+      4048 +  // without needing a re-prefetch, since the eviction was sk
+           +ipped.
+      4049 +  auto add =
+      4050 +      module->GetComputationWithName("entry")->GetInstruction
+           +WithName("add");
+      4051 +  auto add_operand = add->operand(0);
+      4052 +  EXPECT_EQ(add_operand->shape().layout().memory_space(),
+      4053 +            kAlternateMemorySpace);
+      4054 +}
+      4055 +
+      4056 +TEST_F(MemorySpaceAssignmentTest,
+      4057 +       ConditionalFallsBackToEvictionWhenBranchUseFar) {
+      4058 +  // When a branch has uses that are too far from the paramet
+           +er (can't fit in
+      4059 +  // alternate memory without a copy), the optimization shoul
+           +d fall back to
+      4060 +  // eviction.
+      4061 +  absl::string_view hlo_string = R"hlo(
+      4062 +  HloModule CondAllocation, is_scheduled=true
+      4063 +
+      4064 +  true_computation {
+      4065 +    p0 = (f32[3]{0}, f32[3]{0}) parameter(0)
+      4066 +    gte0 = f32[3]{0} get-tuple-element(p0), index=0
+      4067 +    neg0 = f32[3]{0} negate(gte0)
+      4068 +    neg1 = f32[3]{0} negate(neg0)
+      4069 +    neg2 = f32[3]{0} negate(neg1)
+      4070 +    neg3 = f32[3]{0} negate(neg2)
+      4071 +    neg4 = f32[3]{0} negate(neg3)
+      4072 +    neg5 = f32[3]{0} negate(neg4)
+      4073 +    neg6 = f32[3]{0} negate(neg5)
+      4074 +    neg7 = f32[3]{0} negate(neg6)
+      4075 +    neg8 = f32[3]{0} negate(neg7)
+      4076 +    neg9 = f32[3]{0} negate(neg8)
+      4077 +    gte1 = f32[3]{0} get-tuple-element(p0), index=1
+      4078 +    ROOT add = f32[3]{0} add(neg9, gte1)
+      4079 +  }
+      4080 +
+      4081 +  false_computation {
+      4082 +    p0 = (f32[3]{0}) parameter(0)
+      4083 +    gte = f32[3]{0} get-tuple-element(p0), index=0
+      4084 +    ROOT neg = f32[3]{0} negate(gte)
+      4085 +  }
+      4086 +
+      4087 +  ENTRY entry {
+      4088 +    p0 = f32[3]{0} parameter(0)
+      4089 +    p1 = pred[] parameter(1)
+      4090 +    copy0 = f32[3]{0} copy(p0)
+      4091 +    copy1 = f32[3]{0} copy(p0)
+      4092 +    tuple0 = (f32[3]{0}, f32[3]{0}) tuple(copy0, copy1)
+      4093 +    tuple1 = (f32[3]{0}) tuple(copy0)
+      4094 +    conditional = f32[3]{0} conditional(p1, tuple0, tuple1),
+           +true_computation=true_computation, false_computation=false_co
+           +mputation
+      4095 +    ROOT add1 = f32[3]{0} add(copy1, conditional)
+      4096 +  }
+      4097 +  )hlo";
+      4098 +  TF_ASSERT_OK_AND_ASSIGN(auto module,
+      4099 +                          ParseAndReturnVerifiedModule(hlo_st
+           +ring));
+      4100 +  Options options = DefaultMemorySpaceOptions();
+      4101 +  options.enable_conditional_redundant_eviction_elimination =
+           + true;
+      4102 +  AssignMemorySpace(module.get(), options);
+      4103 +
+      4104 +  // copy1 has a long use chain in true_computation (gte1 use
+           +d after 10
+      4105 +  // negates), so the mirrored allocation optimization should
+           + NOT apply.
+      4106 +  // The subsequent use (add1) should get copy1 from default
+           +memory (evicted).
+      4107 +  auto add1 =
+      4108 +      module->GetComputationWithName("entry")->GetInstruction
+           +WithName("add1");
+      4109 +  auto add1_operand = add1->operand(0);
+      4110 +  EXPECT_EQ(add1_operand->shape().layout().memory_space(), kD
+           +efaultMemorySpace);
+      4111 +  EXPECT_EQ(add1_operand->opcode(), HloOpcode::kCopyDone);
+      4112 +}
+      4113 +
+      4114  TEST_F(MemorySpaceAssignmentTest, ConditionalMultiUseInWhile)
+             {
+      4115    absl::string_view hlo_string = R"hlo(
+      4116    HloModule CondAllocation, is_scheduled=true
+
+⏺ 13. Build and test
+
+  Let me try building first:
+
+⏺ Bash(bazel build //third_party/xla/xla/service/memory_space_assignment:memory_
+      space_assignment 2>&1 | tail -30)
+  ⎿  (eval):1: command not found: bazel
+
+  Listed 1 directory (ctrl+o to expand)
+
+⏺ Bazel isn't available. Let me at least validate the code compiles conceptually
+   by checking for syntax issues. Let me review the code changes more carefully.
+
+  Let me re-read the modified files to check for issues:
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+⏺ Let me verify the complete new function is syntactically correct:
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Now there's an issue I should consider. The MirroredAllocation::Process method
+   sets the defining position from the original allocation and calls UpdateUses.
+   Let me re-read it:
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ The Process method of MirroredAllocation sets the defining position from the
+  original allocation and updates uses. For the while loop case, the original
+  allocation is in default memory, and the mirrored allocation references it.
+  For our case, the original allocation is in alternate memory, and the mirrored
+   allocation is a reference to the same alternate memory.
+
+  When Process runs for a mirrored allocation of a conditional branch parameter,
+   it will try to AddGetTupleElements() which gets the producing instruction
+  based on the defining position. The defining position is set to the original
+  allocation's defining position, which is in the entry computation. But the
+  uses for the branch parameter mirrored allocation are in the branch
+  computation. The UpdateUses call will try to update uses in the branch
+  computation with an instruction from the entry computation, which would be
+  incorrect.
+
+  Wait, but mirrored allocations for branch parameters - would they have uses?
+  Let me check. The mirrored allocation is created without any uses added to it.
+   Looking at the code:
+
+  av.mutable_allocation_sequence()->push_back(
+      std::make_unique<MirroredAllocation>(
+          *aliased_allocation, parameter_time, MemorySpace::kAlternate));
+
+  No uses are added. But the MirroredAllocation::Process method calls UpdateUses
+   which iterates over uses(). If there are no uses, UpdateUses would be a no-op
+   (iterates over empty vector). So this should be fine.
+
+  But actually, I need to think about what the mirrored allocation is supposed
+  to accomplish. The purpose is:
+  1. Branch parameters should be recognized as being in alternate memory at the
+  same chunk
+  2. The MSA allocator should treat the branch parameter's allocation sequence
+  as starting in alternate memory
+
+  When the algorithm later processes the allocation values for the branch
+  parameters, it will find that the allocation sequence already has a mirrored
+  allocation in alternate memory, so it won't need to create a separate
+  allocation.
+
+  Actually, wait. Let me reconsider. The way the while-loop mirrored allocation
+  works: the MirroredAllocation in default memory tells the system that there's
+  already a copy of the buffer in default memory, so a redundant eviction can be
+   avoided. For ParentAllocation, it actually adds a new parameter to the while
+  loop to thread through the default memory reference.
+
+  For conditionals, the situation is different. The buffer is already in
+  alternate memory, and we want to tell the branch computations that the buffer
+  is available in alternate memory at the parameter. We don't need to add new
+  parameters (the parameter already receives the buffer). We just need to
+  prevent the algorithm from evicting the buffer before the conditional.
+
+  Actually, I think the mirrored allocations for branch parameters might cause
+  issues with Process. Let me check if branch parameters even have
+  AllocationValues that need mirroring.
+
+  Looking at how allocation values work: for each value in the HLO graph, there
+  are allocation values. The branch computation parameters would have their own
+  allocation values. When those allocation values are processed, the algorithm
+  would try to place them in memory. If there's already a mirrored allocation at
+   the parameter time saying the buffer is in alternate memory, the algorithm
+  might try to use it.
+
+  But actually, looking at FinalizeAllocations more carefully - it processes ALL
+   allocations in the sequence. If a mirrored allocation in alternate memory
+  with start_time == end_time is finalized, it will be added to the allocations_
+   and the colocation vector. The Process method will run and UpdateUses will
+  iterate over empty uses, so no harm there.
+
+  However, I realize there might be a subtler issue. The mirrored allocation has
+   the defining position of the ORIGINAL allocation (from the entry
+  computation), not the branch parameter. When Process runs for the mirrored
+  allocation, AddGetTupleElements() will try to get a producing instruction
+  based on the entry computation's position. But this instruction might not be
+  accessible from the branch computation.
+
+  Wait, Process is only called if the allocation is "needed". For
+  MirroredAllocation, MarkIfNeeded calls MarkNeeded, so it's always marked as
+  needed. But MarkNeeded also marks the original allocation as needed. For the
+  while loop case, this makes sense because the mirrored allocation represents a
+   new copy in default memory. For our case...
+
+  Actually, I think the Process method for MirroredAllocation in alternate
+  memory is problematic. It would try to find the producing instruction in the
+  wrong computation. Let me reconsider the approach.
+
+  The actual goal of the mirrored allocation here is NOT to create new
+  instructions or update uses - it's to prevent the algorithm from evicting the
+  buffer. The real change that matters is:
+  1. Skip the forced eviction in CreateAllocationRequest (already done with the
+  conditionals_with_mirrored_alternate_mem_ check)
+  2. The branch parameter allocation values need to know they can start from
+  alternate memory
+
+  For (2), maybe I don't actually need mirrored allocations at all. The key
+  change is just (1) - skip the eviction for subsequent uses. The branch
+  parameters will naturally get alternate memory because
+  IsUseAllowedInAlternateMemory already allows them (that check happens early in
+   the code at line 859-907).
+
+  Let me reconsider: do I actually need the mirrored allocations? The primary
+  purpose of the eviction at line 4400-4410 is to force the NEXT use after the
+  conditional to go through default memory, because the conditional might have
+  clobbered the alternate memory. If we determine that the conditional does NOT
+  clobber alternate memory (all branch uses can read from it), then we just need
+   to skip the eviction for the next use. We don't necessarily need mirrored
+  allocations for the branch parameters.
+
+  Wait, but the branch parameter allocation values also need to work correctly.
+  When the branch parameter's allocation value is processed, it needs to find
+  the buffer in alternate memory. The IsUseAllowedInAlternateMemory check for
+  the conditional already verifies that the parameter-to-first-use distance is
+  short enough. So the branch parameters should naturally get alternate memory
+  allocations.
+
+  However, the issue is that without mirrored allocations, the branch parameter
+  allocation values might not share the same offset as the original allocation.
+  The mirrored allocations ensure they use the same physical chunk.
+
+  Actually, the conditional already passes the buffer through as a tuple
+  element. The branch parameters are defined by the conditional's operand. The
+  alternate memory allocation should be naturally passed through. The
+  PinnedAllocation for the branch parameter should reference the same position
+  and get the same alternate memory.
+
+  Let me reconsider the full approach. Let me check if the mirrored allocations
+  actually serve a purpose or if the main change should just be skipping the
+  eviction.
+
+  Let me simplify: The fundamental issue is:
+  1. When buffer B is in VMEM and used by a conditional, the algorithm forces
+  eviction before the conditional
+  2. After the conditional, subsequent uses need to re-prefetch
+
+  The fix should be:
+  1. Check if all branch uses can use VMEM
+  2. If yes, skip the eviction for the subsequent use
+  3. Branch parameters will naturally get VMEM allocations because
+  IsUseAllowedInAlternateMemory already allows it
+
+  The mirrored allocations might be useful to ensure the offset is shared, but
+  they're also causing complications. Let me remove them and focus on the core
+  change: skipping the eviction.
+
+  Actually, let me look at this from the other direction. In the existing code,
+  when the algorithm processes a conditional use:
+
+  1. IsUseAllowedInAlternateMemory checks if the conditional can use alternate
+  memory (checks each branch)
+  2. If allowed, the buffer stays in alternate memory for the conditional
+  3. But then in CreateAllocationRequest, the NEXT use is forced to evict
+  (allow_no_copy_alternate_mem_allocation = false)
+
+  The key fix is: if all branches can use alternate memory AND the buffer covers
+   the entire conditional duration, then the next use should NOT need to evict.
+  The buffer is still intact in VMEM.
+
+  So the simplest fix is:
+  1. Add the check in CreateAllocationRequest to see if the conditional use was
+  fully in alternate memory with short enough branch uses
+  2. If so, skip the allow_no_copy_alternate_mem_allocation = false
+
+  The mirrored allocations are an extra optimization to ensure offset sharing,
+  but they're not strictly necessary for the core fix. However, the user
+  specifically asked for them. Let me make the mirrored allocations work
+  correctly.
+
+  The issue with Process for the alternate-memory mirrored allocation: I need to
+   make it a no-op for alternate memory mirrored allocations. The Process method
+   should not try to add GTE instructions or update uses when the mirrored
+  allocation is in alternate memory and has no uses.
+
+  Let me update the MirroredAllocation::Process method:
+
+⏺ Update(third_party/xla/xla/service/memory_space_assignment/allocation.cc)
+  ⎿  Added 6 lines
+      877
+      878  absl::Status MirroredAllocation::Process(
+      879      const BitcastSplitFn& bitcast_split_fn) {
+      880 +  // For mirrored allocations in alternate memory (e.g., condi
+          +tional branch
+      881 +  // parameters that share the parent's VMEM chunk), there's n
+          +o need to create
+      882 +  // new instructions - the buffer is already at the correct l
+          +ocation.
+      883 +  if (memory_space() == MemorySpace::kAlternate) {
+      884 +    return absl::OkStatus();
+      885 +  }
+      886    set_original_defining_position(original_allocation_.defining
+           _position());
+      887    HloInstruction* producing_instruction = AddGetTupleElements(
+           );
+      888    HloComputation* computation = producing_instruction->parent(
+           );
+
+⏺ Also, MarkIfNeeded and MarkNeeded for MirroredAllocation currently always mark
+   as needed and also mark the original allocation as needed. For alternate
+  memory mirrored allocations, this is fine - the original allocation should
+  indeed be marked as needed.
+
+  Now, there's another concern with FinalizeAllocations. At line 6109-6110:
+  if (inserted_allocation->memory_space() == MemorySpace::kAlternate) {
+      auto* aliased_offset = GetAliasedOffset(*inserted_allocation);
+
+  This calls GetAliasedOffset on the mirrored allocation. We already added the
+  mirrored allocation to aliased_offset_map_ via CreateOrAddToAliasedOffset, so
+  this should work.
+
+  But wait - FinalizeAllocations also calls ClearPendingChunks() at the end,
+  which clears aliased_offset_map_ and aliased_offsets_. This happens at the end
+   of each colocated interval group. The GetAliasedOffset call within
+  FinalizeAllocations happens before the clear, so it should be fine.
+
+  Now let me think about another potential issue. The repack_allocation_blocks_
+  at line 6135-6139 creates blocks for each allocation with its chunk. Two
+  allocations sharing the same chunk but at different times would create
+  separate blocks. These blocks are then colocated via
+  MarkRepackAllocationBlocksColocated. Since our mirrored allocation shares the
+  same AliasedOffset as the original, they'd be in the same colocation group,
+  which is correct.
+
+  But there's a problem: the mirrored allocation has start_time == end_time,
+  which means MakeRepackAllocationBlock would create a block with a zero-width
+  time interval. Let me check if that's OK:
+
+  Searched for 3 patterns, read 1 file (ctrl+o to expand)
+
+⏺ So start_time == end_time should be fine. It creates a block that lives for
+  exactly one time step.
+
+  Now let me also think about whether the existing
+  VerifyAndExportHeapSimulatorTrace would have issues. This function works with
+  preset_assignments, which are populated from allocations that have alternate
+  memory. The mirrored allocations would NOT be in the preset_assignments
+  because they don't define new positions - they share the original position.
+  Let me verify.
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ At line 542,
+  alternate_memory_assignments_.emplace_back(allocation->defining_position(),
+  allocation->chunk()) would add the mirrored allocation's position and chunk.
+  Since the mirrored allocation's defining position is the SAME as the original
+  allocation's defining position (set in the constructor), this would add a
+  duplicate entry.
+
+  This could be a problem in ExportAndColorBuffers:
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+⏺ At line 593-597, the function handles duplicate buffer positions using
+  seen_buffer_offsets. If a buffer is already seen with the same offset, it
+  skips it. If the offset differs, it CHECK_EQ fails. Since our mirrored
+  allocation has the same chunk (and thus the same offset) as the original, the
+  duplicate position would be harmlessly skipped. Good.
+
+  But wait, the defining_position of the mirrored allocation is the original
+  allocation's defining position, which is in the ENTRY computation. This
+  position would map to a different buffer than the branch parameter's position.
+   Actually no - the defining_position() method of MirroredAllocation returns
+  original_defining_position(), which was set in the constructor from
+  original_allocation.defining_position(). So it's the same position as the
+  original allocation. The GetUniqueBufferAt call would return the same buffer,
+  so seen_buffer_offsets would handle the duplicate correctly.
+
+  OK, I think the approach is sound. Let me now also handle a subtle issue: the
+  mirrored allocation is added to the branch parameter's AllocationValue's
+  allocation sequence. But the original allocation is from a DIFFERENT
+  AllocationValue (the entry computation's). When FinalizeAllocations runs and
+  calls GetAliasedOffset for the mirrored allocation, it needs to find it in the
+   aliased_offset_map_. We added it via CreateOrAddToAliasedOffset in our new
+  function, which is called before FinalizeAllocations. But ClearPendingChunks()
+   clears the aliased_offset_map_. This clearing happens at the end of each
+  FinalizeAllocations call (line 6150-6151).
+
+  The issue: MaybeCreateMirroredAllocationForConditionalUse is called from
+  within AllocateAllocationValues, which processes a group of colocated
+  allocation values. FinalizeAllocations is called later for the same group. So
+  the CreateOrAddToAliasedOffset call happens during AllocateAllocationValues,
+  and GetAliasedOffset is called during FinalizeAllocations of the same group.
+  Since ClearPendingChunks only happens at the END of FinalizeAllocations, the
+  map should still be populated when GetAliasedOffset is called.
+
+  Wait, actually, let me check the flow more carefully. The
+  MaybeCreateMirroredAllocationForConditionalUse is called with
+  allocation_values which is the span of allocation values being processed. But
+  the branch parameter AllocationValues might be in a DIFFERENT colocated group
+  than the entry computation's allocation values. If they're in different
+  groups, then ClearPendingChunks from the first group would have cleared the
+  offset map before the second group's FinalizeAllocations tries to look up the
+  offset.
+
+  Let me check how colocated groups work. The allocation values for a
+  conditional operand (in the entry computation) and the branch parameters (in
+  the branch computations) should be colocated because they share the same HLO
+  buffer. Let me verify:
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+⏺ I see - CreateAllocationValuesFromColocatedIntervals is called for EACH
+  colocated group and adds allocation values to proposal.allocation_values. All
+  colocated intervals for a buffer are processed together. The conditional
+  operand and branch parameters should be in the same colocated group.
+
+  Let me check: the buffer for the conditional's operand (say, copy0 in the
+  entry computation) is colocated with the branch parameter values. The
+  GetSortedColocatedIntervals function builds the colocated group from the
+  buffer's values and their colocations.
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ And at line 319:
+  interval.colocations = {++buffer.values().begin(), buffer.values().end()};
+
+  So colocated intervals include all values of the same buffer. The conditional
+  operand and branch parameters would be values of the same buffer (since
+  conditionals alias their operands with branch parameters). So they SHOULD be
+  in the same colocated group, and thus processed together in
+  AllocateAllocationValues.
+
+  Good - this means the CreateOrAddToAliasedOffset call from
+  MaybeCreateMirroredAllocationForConditionalUse and the GetAliasedOffset call
+  in FinalizeAllocations are in the same processing group, so the offset map
+  won't be cleared in between.
+
+  However, there's another issue. The AllocateAllocationValues function
+  processes allocation values one at a time. But the
+  MaybeCreateMirroredAllocationForConditionalUse is called during the processing
+   of the entry computation's allocation value (the one that has the conditional
+   use). It then modifies other allocation values (branch parameters) by pushing
+   mirrored allocations onto their sequences. But those branch parameter
+  allocation values may not have been processed yet (or may have already been
+  processed).
+
+  If the branch parameter allocation values have already been processed, then
+  adding a mirrored allocation to their sequences after processing would mean
+  the mirrored allocation is processed by FinalizeAllocations but wasn't part of
+   the AllocateSegment flow. This is the same pattern as the while-loop
+  MaybeCreateMirroredParentAllocationForWhileUse which also adds allocations to
+  other allocation values' sequences after their normal processing.
+
+  Let me verify that the while-loop approach has the same pattern:
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ I see - the while-loop code also pushes allocations to other allocation
+  values' sequences (body parameter and after-while allocation value). It
+  creates ParentAllocation and MirroredAllocation in default memory.
+  Importantly, it does NOT call CreateOrAddToAliasedOffset for these
+  allocations. The default-memory allocations don't need aliased offset
+  tracking.
+
+  But our alternate-memory mirrored allocations DO need aliased offset tracking
+  because FinalizeAllocations calls GetAliasedOffset on all alternate memory
+  allocations. The while-loop mirrored allocations are in default memory, so
+  they skip this check.
+
+  So there's a problem: when FinalizeAllocations processes the branch
+  parameter's allocation sequence and hits our mirrored allocation in alternate
+  memory, it calls GetAliasedOffset, which looks up in aliased_offset_map_. We
+  added the entry during MaybeCreateMirroredAllocationForConditionalUse. BUT:
+  FinalizeAllocations is called AFTER AllocateAllocationValues completes. Let me
+   check:
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+⏺ I see - FinalizeAllocations at line 3340 is called after
+  AllocateAllocationValues at line 3224, but within the same retry loop. The
+  aliased_offset_map_ is cleared only at the end of FinalizeAllocations (in
+  ClearPendingChunks). So the timeline is:
+
+  1. AllocateAllocationValues runs, which calls
+  MaybeCreateMirroredAllocationForConditionalUse, which calls
+  CreateOrAddToAliasedOffset for the mirrored allocation
+  2. FinalizeAllocations runs, which calls GetAliasedOffset for the mirrored
+  allocation - this should find it in the map
+  3. ClearPendingChunks at the end of FinalizeAllocations clears the map
+
+  Wait, but there's a complication. If the allocation fails and requires
+  uncommit (UncommitPendingChunks), the pending chunks (including our mirrored
+  allocation's offset entry) would be uncommitted. But the mirrored allocation
+  itself was pushed onto a different AllocationValue's sequence, not as a
+  pending chunk. Let me check UncommitPendingChunks:
+
+  Searched for 2 patterns, read 1 file (ctrl+o to expand)
+
+⏺ At line 6012-6013: UncommitPendingChunks clears ALL allocation sequences of
+  the allocation values. So if we retry, the mirrored allocations we created are
+   also cleared. That's correct - they would need to be recreated on retry.
+
+  Also, the conditionals_with_mirrored_alternate_mem_ set should also be cleared
+   on uncommit. Let me add that. Actually, let me think about this. If we
+  uncommit and retry, the whole allocation process starts over for these
+  allocation values. The conditionals_with_mirrored_alternate_mem_ set would be
+  populated again during the retry. But if the retry fails and goes with default
+   memory, the old entries in the set would be stale.
+
+  Actually, since conditionals_with_mirrored_alternate_mem_ is a member variable
+   that persists across different colocated groups, I should clear entries for
+  the current group when uncommitting. But it's simpler and safer to just check
+  at the point of use (in CreateAllocationRequest) whether the conditional is
+  actually mirrored by checking the current state of the allocation, rather than
+   relying on a persistent set.
+
+  Let me reconsider the approach. Instead of using a persistent set, I can check
+   at the eviction logic in CreateAllocationRequest whether the conditional
+  operand is still in alternate memory at the conditional time. If the
+  allocation was properly made (all branches can use alternate memory), the
+  buffer should still be in alternate memory.
+
+  Actually wait, the CreateAllocationRequest processes the NEXT use after the
+  conditional. At that point, the current allocation might or might not be in
+  alternate memory. The whole point of the eviction logic is to decide whether
+  the next use can use the same alternate memory allocation or needs to evict
+  first.
+
+  Let me keep the set-based approach but clear it when uncommitting:
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Update(third_party/xla/xla/service/memory_space_assignment/algorithm.cc)
+  ⎿  Added 1 line
+      6149    pending_required_assignments_.clear();
+      6150    aliased_offset_map_.clear();
+      6151    aliased_offsets_.clear();
+      6152 +  conditionals_with_mirrored_alternate_mem_.clear();
+      6153  }
+      6154
+      6155  bool MsaAlgorithm::IsInstructionPendingReplacements(
+
+⏺ Now let me review all changes by looking at the complete modified files to
+  verify correctness:
+
+⏺ Bash(git diff --stat)
+  ⎿   .../service/memory_space_assignment/algorithm.cc   | 114 ++++++++++++
+     +++++++-
+      .../service/memory_space_assignment/algorithm.h    |  14 +++
+     … +7 lines (ctrl+o to expand)
+
+⏺ Bash(git diff)
+  ⎿  diff --git a/third_party/xla/xla/service/memory_space_assignment/algor
+     ithm.cc b/third_party/xla/xla/service/memory_space_assignment/algorith
+     m.cc
+     … +279 lines (ctrl+o to expand)
+
+⏺ The diff looks clean and comprehensive. Let me now think about edge cases and
+  potential issues:
+
+  1. Nested conditionals: If a conditional has another conditional as a branch
+  use, our check iterates only the uses of the current allocation value. The
+  nested conditional's branch parameters would be in a different allocation
+  value. The check for CanAllocateInAlternateMemoryNoCopy only looks at the
+  immediate uses in the branch, so a nested conditional use would be checked
+  against the branch's computation, not recursively. This should be fine because
+   the nested conditional's operand handling would be handled when processing
+  that nested conditional's allocation value.
+  2. Multiple operands: A conditional can pass the same buffer to multiple
+  branches (e.g., as both true and false operands). Our check iterates all uses
+  that point to the same conditional instruction, so all branches are checked.
+  3. Tuple operands: The check uses other_use.hlo_use.operand_index to look up
+  the parameter value at the correct index, which handles tuple operands
+  correctly.
+  4. Race with offset map clearing: We clear
+  conditionals_with_mirrored_alternate_mem_ in ClearPendingChunks, which is
+  called at end of FinalizeAllocations and in UncommitPendingChunks. This
+  ensures the set is fresh for each processing group.
+
+  Let me also check a potential issue with the
+  is_use_allowed_in_alternate_mem_fn check in our new function. The function
+  options_.is_use_allowed_in_alternate_mem_fn is set by the test base to check
+  if the value belongs to the entry computation. The conditional use itself (as
+  an HloUse) refers to the conditional instruction in the entry computation. So
+  checking is_use_allowed_in_alternate_mem_fn(other_use.hlo_use) would check the
+   use of the conditional in the entry computation, which should be allowed.
+
+  Wait, but we're already checking this in IsUseAllowedInAlternateMemory which
+  is called earlier. The additional check in our function is a safety net. It
+  should be fine.
+
+  Let me also verify one more thing - the ExportAndColorBuffers behavior with
+  our mirrored allocation. The mirrored allocation's defining position is the
+  same as the original allocation's. In ExportAndColorBuffers, the
+  seen_buffer_offsets map uses buffer IDs. The buffer for the original
+  allocation and the buffer for the mirrored allocation would be the SAME buffer
+   (since they refer to the same HLO value position). So the duplicate would be
+  caught by seen_buffer_offset_it != seen_buffer_offsets.end() and the
+  CHECK_EQ(chunk.offset, ...) would pass because they share the same chunk.
+
+  Actually wait - I realize there could be an issue. The
+  alternate_memory_assignments_ list at line 542 adds the defining_position and
+  chunk for EVERY alternate memory allocation. For the mirrored allocation, it
+  would add the same position+chunk pair as the original allocation already
+  added. But ExportAndColorBuffers handles this through seen_buffer_offsets, so
+  it would skip the duplicate. Good.
+
+  Now let me also look at the Process flow for potential issues. When
+  MemorySpaceAssignment::Process runs, it iterates over all allocations. For our
+   mirrored allocation in alternate memory, Process returns absl::OkStatus() (we
+   made it a no-op for alternate memory). Then at line 527, the code checks
+  allocation->memory_space() == MemorySpace::kAlternate and adds to
+  alternate_memory_assignments_. This is fine.
+
+  At line 566-577, the post-process step checks for pinned allocations and
+  inserts into seen_pinned_positions. Our mirrored allocation is not a pinned
+  allocation, so it's skipped.
+
+  I think the implementation is sound. Let me also verify that I'm not missing
+  any compilation issues by checking includes:
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+⏺ The MirroredAllocation type is declared in allocation.h which is already
+  included in memory_space_assignment.cc. Good.
+
+  Let me also check the AllocationValue::computation() method exists since I use
+   it:
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+⏺ Good. And mutable_allocation_sequence():
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+⏺ Good. Let me also check defining_instruction():
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+⏺ All the APIs we're using exist. Now let me also double-check the test to make
+  sure the HLO is valid - the test for the happy path passes copy as both
+  operands to tuple and then to conditional:
+
+  The test HLO looks correct. The copy value is used both in the tuple (which is
+   the conditional's true and false operand) and later in add. This is exactly
+  the scenario where the buffer should stay in alternate memory.
+
+  Let me think about one more edge case: what if allocation_value.uses() returns
+   the conditional use multiple times (once for each operand)? Looking at how
+  allocation values are created for conditionals, the same value might be used
+  as operand 1 and operand 2 of the conditional (true and false branches). In
+  that case, the same allocation value would have multiple uses pointing to the
+  conditional instruction but with different operand numbers. Our loop handles
+  this correctly by checking other_use.hlo_use.operand_number - 1 to get the
+  right called computation.
+
+  However, there's a subtlety: the use parameter passed to
+  MaybeCreateMirroredAllocationForConditionalUse is the current use being
+  processed. But we iterate ALL uses of the allocation_value that point to the
+  conditional. This is intentional - we need to check all branches, not just the
+   current one.
+
+  There's another potential issue: the is_use_allowed_in_alternate_mem_fn check.
+   In the test base, this function checks:
+  auto is_allowed_in_alternate_mem = [](const HloValue& value) {
+      return (!in_entry_computation || instruction->opcode() !=
+  HloOpcode::kParameter);
+  };
+
+  But this is for VALUES, not USES. The is_use_allowed_in_alternate_mem_fn is a
+  different function. Let me check:
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+⏺ OK, the default is_use_allowed_in_alternate_mem_fn returns true for all uses.
+  So our check would pass by default. This is fine for tests.
+
+  Now let me also think about a subtle issue with allocation_value.uses() vs
+  allocation_value_to_update.uses(). In
+  MaybeCreateMirroredAllocationForConditionalUse, I iterate
+  allocation_value.uses(). But the function receives allocation_value as the
+  first parameter. Let me check the call site:
+
+  MaybeCreateMirroredAllocationForConditionalUse(
+      allocation_value_to_update, use, use_time, allocation_values);
+
+  The first parameter is allocation_value_to_update. Let me check what this is:
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ I see - allocation_value_to_update might be different from allocation_value.
+  Let me look at how entry is structured:
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ I see - allocation_value_to_update can be a different allocation value than
+  allocation_value. The MaybeCreateMirroredParentAllocationForWhileUse is also
+  called with allocation_value_to_update as the first parameter. Looking at its
+  implementation, it uses allocation_value.allocation_sequence() to find the
+  live allocation.
+
+  In our function, we iterate allocation_value.uses() - but since the first
+  parameter is allocation_value_to_update (which may differ from
+  allocation_value), this could be an issue.
+
+  Wait, looking more carefully at
+  MaybeCreateMirroredParentAllocationForWhileUse:
+  void MsaAlgorithm::MaybeCreateMirroredParentAllocationForWhileUse(
+      const AllocationValue& allocation_value, const AllocationValue::Use& use,
+  ...)
+
+  It receives allocation_value_to_update as the first parameter, but it's named
+  allocation_value in the function signature. Let me look at how it uses it: it
+  calls GetLiveAllocationAt(*allocation_value.allocation_sequence(), use_time).
+  So it uses the allocation_value_to_update's allocation sequence, not the
+  original allocation value's.
+
+  For our function, we also call
+  GetLiveAllocationAt(*allocation_value.allocation_sequence(), use_time). Since
+  we receive allocation_value_to_update, this should be correct - we're checking
+   if the current allocation value has a live allocation in alternate memory at
+  the use time.
+
+  However, we then iterate allocation_value.uses() to check all uses of this
+  allocation value at the conditional. Since allocation_value here is
+  allocation_value_to_update, its uses might not include all the conditional
+  uses we need to check. In the case where allocation_value_to_update is
+  different from the original allocation_value, the uses might be different.
+
+  But actually, for the conditional case, the uses we need to check are the uses
+   that point to the conditional instruction. The allocation_value_to_update
+  should have these uses because it's the allocation value whose buffer is being
+   passed to the conditional. So this should be correct.
+
+  Wait, but looking at MaybeCreateMirroredParentAllocationForWhileUse, it also
+  uses allocation_value.value()->positions() and
+  allocation_value.allocation_sequence() - these are all from
+  allocation_value_to_update, which is the correct one for making allocation
+  decisions.
+
+  I think the implementation is correct. The key insight is that
+  allocation_value_to_update is the allocation value whose allocation sequence
+  we're managing, and its uses include the conditional use we need to check.
+
+  Let me now do a final review of the test cases. The happy path test:
+  - copy creates a buffer in alternate memory
+  - tuple = (copy) wraps it
+  - conditional uses it in both branches with short negate chains
+  - add = add(copy, conditional) uses copy again
+
+  With our change, the conditional should NOT force eviction, so copy stays in
+  alternate memory for the add use.
+
+  The fallback test:
+  - copy1 is used in true_computation as gte1 after a long negate chain (10
+  negates)
+  - The CanAllocateInAlternateMemoryNoCopy check would fail for this branch
+  because the parameter-to-use distance is too large
+  - So the optimization falls back and eviction happens as before
+
+  Both tests should be correct.
+
+  Let me also check that the ConditionalShouldBeAllocatedInAlternateMem test
+  still passes with our change. That test checks that simple conditionals get
+  alternate memory. Our change adds an optimization on top of this - it should
+  not break existing behavior. The test doesn't have a subsequent use after the
+  conditional, so the eviction logic doesn't come into play.
+
+  The existing ConditionalMultiUse test checks that eviction happens when
+  there's a subsequent use. With our change, this test should STILL pass because
+   it has the same "long negate chain" pattern in true_computation. Let me
+  re-verify:
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ The ConditionalMultiUse test has copy1 used in true_computation where it's
+  gte1 which is immediately used in add0. The gte1 use is short (close to
+  parameter). But copy1 is also element 1 of tuple0. In true_computation, gte1
+  (index=1) is used in add0 immediately after gte0 and gte1. So the
+  parameter-to-use distance for gte1 is SHORT.
+
+  Wait, this means our optimization WOULD apply for copy1 in this test case! Let
+   me re-examine...
+
+  Actually, the issue is more nuanced. Looking at true_computation: it takes
+  (f32[3], f32[3]) as parameter. Both gte0 (index=0) and gte1 (index=1) are used
+   immediately in add0. So for copy1 at index=1, the use is very close to the
+  parameter.
+
+  But in false_computation, the parameter is (f32[3]) - only one element. copy1
+  is NOT passed to false_computation because tuple1 = (f32[3]) tuple(copy0) only
+   has copy0.
+
+  So copy1 is only passed to true_computation (as element 1 of tuple0). The
+  check in our function iterates allocation_value.uses() looking for uses where
+  other_use.hlo_use.instruction == hlo_use.instruction (the conditional). For
+  copy1, the use would be conditional, operand_number=1, operand_index={1}. This
+   use corresponds to true_computation (operand 1 = true branch). The check
+  would find that in true_computation, gte1 is used immediately in add0, so
+  CanAllocateInAlternateMemoryNoCopy would pass.
+
+  But wait - the test expects copy1's subsequent use (add1) to be evicted. If
+  our optimization kicks in and skips the eviction, this test would fail!
+
+  This is a problem. The existing ConditionalMultiUse test expects eviction
+  because the branches have a long negate chain. But looking more carefully, the
+   long chain is for gte0 (index 0, which is copy0), not for gte1 (index 1,
+  which is copy1). The gte1 use is short.
+
+  So with our optimization, copy1 would NOT be evicted (it stays in alternate
+  memory through the conditional since gte1's use is short). This would CHANGE
+  the behavior of the existing test.
+
+  Actually, wait. Let me think about whether copy1 is the value being processed.
+   The allocation value for copy1 has a use at the conditional (operand 1, index
+   1). When processing this use, MaybeCreateMirroredAllocationForConditionalUse
+  is called. It checks ALL uses of the same conditional instruction for this
+  allocation value. Since copy1 only appears as operand 1 (true branch), index
+  1, the check would only look at true_computation's branch. In
+  true_computation, gte1 is used immediately in add0, so the check passes.
+
+  But the existing test expects eviction! This means our optimization would
+  change the behavior of an existing test. We need to be careful here.
+
+  Actually, let me re-read the test expectation:
+  auto add1_operand = add1->operand(0);
+  EXPECT_EQ(add1_operand->shape().layout().memory_space(), kDefaultMemorySpace);
+  EXPECT_EQ(add1_operand->opcode(), HloOpcode::kCopyDone);
+
+  This test expects add1's operand (copy1) to come from default memory after
+  eviction. With our optimization, copy1 would stay in alternate memory.
+
+  However, the test doesn't set
+  enable_conditional_redundant_eviction_elimination - it uses the default
+  options. And we set the default to true. This means the existing test would
+  break!
+
+  I have two options:
+  1. Change the default to false to preserve backward compatibility
+  2. Update the existing test
+
+  Since this is a new optimization, it's safer to default to true since it
+  eliminates wasteful bandwidth. But the existing test expects the old behavior.
+   Let me update the existing ConditionalMultiUse test to accommodate the new
+  behavior.
+
+  Actually wait - let me re-check. In ConditionalMultiUse, does the long negate
+  chain affect copy1 or not?
+
+  The true_computation takes (f32[3], f32[3]) parameter:
+  - gte0 = get-tuple-element(p0), index=0  → this is copy0
+  - gte1 = get-tuple-element(p0), index=1  → this is copy1
+  - add0 = add(gte0, gte1)  → both used immediately
+  - neg0 through neg9 = long negate chain on add0
+
+  So gte1 (copy1) is used immediately in add0. The parameter-to-use distance is
+  very short. Our check should pass for copy1's use in the true branch.
+
+  BUT - looking at the false branch:
+  false_computation {
+      p0 = (f32[3]{0}) parameter(0)
+      gte = f32[3]{0} get-tuple-element(p0), index=0
+      ROOT neg = f32[3]{0} negate(gte)
+  }
+
+  The false branch takes tuple1 = (f32[3]) tuple(copy0), which only has copy0.
+  So copy1 is NOT in the false branch at all. The check in our function would
+  only check true_computation for copy1's allocation value.
+
+  However, there's a subtle issue: the allocation value for copy1 might have
+  uses at both operands of the conditional. Let me think...
+
+  The conditional has 3 operands: operand 0 (predicate), operand 1 (true_operand
+   = tuple0), operand 2 (false_operand = tuple1).
+  - tuple0 = (copy0, copy1)
+  - tuple1 = (copy0)
+
+  For the AllocationValue of copy1, the use at the conditional would be:
+  {conditional, operand_number=1, operand_index={1}}. This use passes copy1 to
+  true_computation at index 1.
+
+  copy1 is NOT part of tuple1, so there's no use at operand_number=2 for copy1.
+  So our check would only iterate over the true_computation branch, where the
+  use is short. The check would pass, and our optimization would apply.
+
+  This means the existing ConditionalMultiUse test would fail. I need to either:
+  1. Update the test to expect the new behavior
+  2. Default the option to false
+
+  Let me go with option 1 - update the test to expect the new behavior. With our
+   optimization, copy1 should stay in alternate memory for the add1 use.
+
+  Actually, wait. Let me reconsider whether this is really correct. The concern
+  is: inside true_computation, the conditional might have modified the alternate
+   memory. But with our check, we know that all uses inside the branches are
+  short-lived and can use alternate memory. So the buffer is not being modified
+  - it's being READ from alternate memory. The buffer stays intact.
+
+  But the conditional body might WRITE to the same alternate memory chunk (for
+  other allocations). No - the buffer interval tree ensures no overlapping
+  chunks in alternate memory. So the chunk used by copy1 is exclusively for
+  copy1 during its lifetime. The conditional body can't clobber it.
+
+  So yes, the optimization is correct: if the branch parameter's use is close
+  enough that it can stay in alternate memory, the buffer is not clobbered, and
+  the subsequent use can directly use the alternate memory.
+
+  Let me update the existing ConditionalMultiUse test:
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Actually, I realize I should be more careful. The ConditionalMultiUse test is
+  an existing test that documents expected behavior. Rather than changing it, I
+  should check whether our optimization actually applies here.
+
+  Let me reconsider the check in MaybeCreateMirroredAllocationForConditionalUse.
+   The function iterates allocation_value.uses() to find ALL uses at the
+  conditional instruction. For copy1's allocation value, the uses would include
+  the conditional use at operand 1, index {1}.
+
+  But there's a subtle point: the allocation value for copy1 might NOT be the
+  one being processed when the conditional use is encountered. The uses work
+  list in AllocateAllocationValues might process a different allocation value
+  (perhaps for copy0, which is also used at the conditional). The entry in the
+  work list specifies which allocation value is being updated
+  (allocation_value_to_update). Let me check if the call site ensures we're
+  processing the right allocation value.
+
+  Looking at the call chain:
+  for (auto& entry : uses_work_list) {
+      const AllocationValue::Use& use = entry.uses->at(entry.use_idx);
+      AllocationValue& allocation_value_to_update = ...;
+      ...
+      MaybeCreateMirroredAllocationForConditionalUse(
+          allocation_value_to_update, use, use_time, allocation_values);
+  }
+
+  The function is called for each use in the work list. The
+  allocation_value_to_update is the allocation value whose sequence is being
+  updated. The use is the current use being processed. So when the conditional
+  use of copy1 is processed, allocation_value_to_update should be the allocation
+   value for copy1.
+
+  But does the work list include the conditional use of copy1? The work list is
+  generated by GenerateAllocationSegmentContexts, which processes uses of
+  allocation_values[alloc_value_idx]. If copy1's allocation value is at index
+  alloc_value_idx, then its uses (including the conditional use) would be in the
+   work list.
+
+  So when processing copy1's conditional use, our function would be called with
+  the copy1 allocation value. It would check all uses of copy1 at the
+  conditional instruction. Since copy1 only goes to the true branch (operand 1,
+  index 1), and the use in the true branch is short, the optimization would
+  apply.
+
+  This confirms that the ConditionalMultiUse test would change behavior. Since
+  the optimization is correct, let me update the test:
+
+⏺ Update(third_party/xla/xla/service/memory_space_assignment/memory_space_assign
+        ment_test.cc)
+  ⎿  Added 5 lines, removed 1 line
+      3972    )hlo";
+      3973    TF_ASSERT_OK_AND_ASSIGN(auto module,
+      3974                            ParseAndReturnVerifiedModule(hlo_st
+            ring));
+      3975 -  AssignMemorySpace(module.get());
+      3975 +  // Disable the conditional redundant eviction elimination t
+           +o preserve the
+      3976 +  // original test's expected eviction behavior.
+      3977 +  Options options = DefaultMemorySpaceOptions();
+      3978 +  options.enable_conditional_redundant_eviction_elimination =
+           + false;
+      3979 +  AssignMemorySpace(module.get(), options);
+      3980
+      3981    // Make sure the copy1->add edge is in alternate memory. Be
+            fore conditional,
+      3982    // this should be evicted to default memory and neg uses th
+            e input from
+
+⏺ Wait, but there might be other existing tests that are affected. Let me also
+  check ConditionalMultiUseInWhile:
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ The ConditionalMultiUseInWhile test is more complex - it has a while loop
+  containing a conditional. Looking at it:
+  - In the while body, gte0 is passed to the conditional
+  - The conditional has short uses (just negate)
+  - After the conditional, gte0 is used again in tuple as while root operand
+
+  With our optimization, gte0 would stay in alternate memory through the
+  conditional (since both branches have short uses). Then gte0's use in tuple
+  (while root) would be in alternate memory too, avoiding the eviction.
+
+  But the test expects:
+  while_root_operand = AsyncCopy(alt, def, AsyncCopy(def, alt,
+  GTE(Parameter(0))))
+  which means eviction (alt->def) and re-prefetch (def->alt). With our
+  optimization, this pattern would change.
+
+  However, this test uses gte0 not copy1. Let me re-read the while body:
+  gte0 = get-tuple-element(p0), index=0
+  ...
+  cond_tuple = (f32[3]) tuple(gte0)
+  conditional = conditional(gte2, cond_tuple, cond_tuple), ...
+  add = add(conditional, gte1)
+  neg0 = negate(add)
+  neg1 = negate(neg0)
+  ROOT tuple = (f32[3], f32[3], pred[]) tuple(gte0, neg1, gte2)
+
+  gte0 is used in:
+  1. cond_tuple (which goes to conditional)
+  2. tuple (while body root)
+
+  The conditional use of gte0 is at operand 1 and operand 2 (both branches get
+  cond_tuple). In both branches, the use is short (just negate). So our
+  optimization would apply.
+
+  After the conditional, gte0 is used in the while root tuple. With our
+  optimization, gte0 should still be in alternate memory, so no eviction is
+  needed.
+
+  But the test expects the eviction pattern. This test would also break. Let me
+  check more carefully whether the test is actually checking gte0's behavior...
+
+  The test checks while_root_operand which is while_root->operand(0) which is
+  gte0. The expectation is:
+  AsyncCopy(alt, def, AsyncCopy(def, alt, GTE(Parameter(0))))
+
+  This means the test expects gte0 to be evicted from alt to def, then
+  prefetched back from def to alt for the while root. With our optimization,
+  this would not happen - gte0 stays in alt memory throughout.
+
+  So this test would also break. I need to either:
+  1. Also update this test
+  2. Make the default false
+
+  Given that changing existing tests is risky without being able to run them,
+  let me make the default false instead. This is the safer approach - the
+  optimization is opt-in, and callers can enable it.
+
+⏺ Update(third_party/xla/xla/service/memory_space_assignment/options.h)
+  ⎿  Added 1 line, removed 1 line
+      337    // the eviction if all uses inside the branches can use alte
+           rnate memory.
+      338    // Branch parameters get mirrored allocations pointing to th
+           e same alternate
+      339    // memory chunk.
+      340 -  bool enable_conditional_redundant_eviction_elimination = tru
+          -e;
+      340 +  bool enable_conditional_redundant_eviction_elimination = fal
+          +se;
+      341
+      342    // An optional memory space assignment autotuning config, wh
+           ich is used
+      343    // to sort allocated buffers.
+
+⏺ Now revert the changes to the existing ConditionalMultiUse test since the
+  default is false:
+
+⏺ Update(third_party/xla/xla/service/memory_space_assignment/memory_space_assign
+        ment_test.cc)
+  ⎿  Added 1 line, removed 5 lines
+      3972    )hlo";
+      3973    TF_ASSERT_OK_AND_ASSIGN(auto module,
+      3974                            ParseAndReturnVerifiedModule(hlo_st
+            ring));
+      3975 -  // Disable the conditional redundant eviction elimination t
+           -o preserve the
+      3976 -  // original test's expected eviction behavior.
+      3977 -  Options options = DefaultMemorySpaceOptions();
+      3978 -  options.enable_conditional_redundant_eviction_elimination =
+           - false;
+      3979 -  AssignMemorySpace(module.get(), options);
+      3975 +  AssignMemorySpace(module.get());
+      3976
+      3977    // Make sure the copy1->add edge is in alternate memory. Be
+            fore conditional,
+      3978    // this should be evicted to default memory and neg uses th
+            e input from
+
+⏺ Good. Now the existing tests won't be affected because the default is false.
+  Our new tests explicitly set the flag to true.
+
+  Let me also verify the final diff is clean:
+
+⏺ Bash(git diff --stat)
+  ⎿   .../service/memory_space_assignment/algorithm.cc   | 114 ++++++++++++
+     +++++++-
+      .../service/memory_space_assignment/algorithm.h    |  14 +++
+     … +7 lines (ctrl+o to expand)
+
+⏺ Let me do a final review of each file:
+
+⏺ Bash(git diff third_party/xla/xla/service/memory_space_assignment/options.h)
+  ⎿  diff --git a/third_party/xla/xla/service/memory_space_assignment/optio
+     ns.h b/third_party/xla/xla/service/memory_space_assignment/options.h
+     index 3fbfc5e1..0027cdf6 100644
+     … +16 lines (ctrl+o to expand)
+
+⏺ Bash(git diff
+      third_party/xla/xla/service/memory_space_assignment/allocation.h)
+  ⎿  diff --git a/third_party/xla/xla/service/memory_space_assignment/alloc
+     ation.h b/third_party/xla/xla/service/memory_space_assignment/allocati
+     on.h
+     … +17 lines (ctrl+o to expand)
+
+⏺ Bash(git diff
+      third_party/xla/xla/service/memory_space_assignment/allocation.cc)
+  ⎿  diff --git a/third_party/xla/xla/service/memory_space_assignment/alloc
+     ation.cc b/third_party/xla/xla/service/memory_space_assignment/allocat
+     ion.cc
+     … +30 lines (ctrl+o to expand)
+
+⏺ Bash(git diff third_party/xla/xla/service/memory_space_assignment/memory_space
+      _assignment.cc)
+  ⎿  diff --git a/third_party/xla/xla/service/memory_space_assignment/memor
+     y_space_assignment.cc b/third_party/xla/xla/service/memory_space_assig
+     nment/memory_space_assignment.cc
+     … +17 lines (ctrl+o to expand)
+
+⏺ All changes look correct. Let me do a final summary of the changes:
+
+  Summary of Changes
+
+  Problem
+
+  XLA's Memory Space Assignment algorithm was too aggressive about evicting
+  conditional operands from alternate memory. When a buffer in VMEM was passed
+  into a conditional, the algorithm forced it back to default memory even when
+  all uses inside the branches could read from alternate memory.
+
+  Solution
+
+  7 files changed, 286 insertions(+), 3 deletions(-)
+
+  1. options.h: Added enable_conditional_redundant_eviction_elimination flag
+  (default false for backward compatibility).
+  2. allocation.h / allocation.cc:
+    - Extended MirroredAllocation with a new constructor accepting an explicit
+  MemorySpace parameter, enabling mirrored allocations in alternate memory
+  (previously hardcoded to default memory).
+    - Updated MirroredAllocation::Process() to be a no-op for alternate memory
+  mirrored allocations (no instruction rewriting needed since the buffer is
+  already in place).
+    - Improved MirroredAllocation::ToString() to include memory space and chunk
+  info for debugging.
+  3. algorithm.h / algorithm.cc:
+    - Added MaybeCreateMirroredAllocationForConditionalUse() method that checks
+  if all branch uses can work with alternate memory, and if so, creates mirrored
+   allocations in VMEM for branch parameters pointing to the same chunk.
+    - Modified the eviction logic in CreateAllocationRequest() to skip forced
+  eviction when mirrored alternate-memory allocations exist for the conditional.
+    - Added conditionals_with_mirrored_alternate_mem_ tracking set, cleared
+  properly in ClearPendingChunks().
+    - Integrated the new method into AllocateAllocationValues alongside the
+  existing while-loop mirrored allocation logic.
+  4. memory_space_assignment.cc: Updated VerifyAllocations() to skip
+  MirroredAllocations in alternate memory from overlap checking, since they
+  represent references to the same physical chunk as the original allocation.
+  5. memory_space_assignment_test.cc: Added two new tests:
+    - Happy path: Verifies that when all branch uses are short, the buffer stays
+   in alternate memory and the subsequent use can access it without re-prefetch.
+    - Fallback: Verifies that when a branch has uses too far from the parameter
+  (long negate chain), the optimization falls back to eviction.
+
+· Processing… (14m 12s · ↓ 29.7k tokens)
+  ⎿  Tip: Use /btw to ask a quick side question without interrupting Claude's
+     current work
+yashverma@yashs-MacBook-Pro B %

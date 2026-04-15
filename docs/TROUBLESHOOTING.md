@@ -222,7 +222,7 @@ start a completely new task with a different PR.
 ## Problem 2: Context Limit Reached
 
 ### What you see on screen
-- You attach to a trajectory tmux session (`tmux attach -t <id>-A`) and see
+- You check a trajectory tmux window (`tmux select-window -t <id>:1`) and see
   the message "Context limit reached" or "context window exceeded"
 - The model may have stopped working partway through, leaving incomplete changes
 - The other trajectory might be fine, or both might be affected
@@ -238,11 +238,10 @@ This is the models problem, not yours. It happens more often when:
 
 ### How to confirm
 ```bash
-# Attach to the trajectory sessions and look for the error
-tmux attach -t <session-id>-A
+# Switch to trajectory windows and look for the error
+tmux select-window -t <session-id>:1   # Trajectory A
+tmux select-window -t <session-id>:2   # Trajectory B
 # Press Ctrl+B then D to detach when done checking
-
-tmux attach -t <session-id>-B
 ```
 
 If you see "Context limit reached" in the output, thats the issue.
@@ -293,12 +292,17 @@ This fails in two scenarios:
 ```bash
 tmux ls
 ```
-You should see 3 sessions:
-- Your launcher session (e.g., `hfi-turn1`)
+Depending on how HFI was launched, you will see one of two layouts:
+
+**Layout 1 (first launch with `--tmux`):** A single session with 3 windows:
+- `<session-uuid>: 3 windows` -- window :0 (control), :1 (A), :2 (B)
+
+**Layout 2 (relaunched with `--tmux --continue`):** Separate sessions:
+- Your launcher session (e.g., `hfi-turn2`)
 - `<session-uuid>-A` (Trajectory A)
 - `<session-uuid>-B` (Trajectory B)
 
-If only the launcher exists and -A/-B are missing, HFI failed to spawn them.
+If you see ONLY the launcher and no trajectory sessions/windows, HFI failed to spawn them.
 
 ### How to fix
 1. Kill everything:
@@ -354,12 +358,11 @@ Other causes:
 
 ### How to confirm
 ```bash
-# Attach to each trajectory and check whats happening
-tmux attach -t <session-id>-A
+# Switch to each trajectory window and check whats happening
+tmux select-window -t <session-id>:1   # Trajectory A
 # Look for "Allow this action?" or "y/n" or "permission" prompts
-# Press Ctrl+B then D to detach
 
-tmux attach -t <session-id>-B
+tmux select-window -t <session-id>:2   # Trajectory B
 ```
 
 ### How to fix
@@ -379,7 +382,8 @@ tmux attach -t <session-id>-B
 ### How to prevent
 - Periodically check on your trajectory sessions during execution:
   ```bash
-  tmux attach -t <session-id>-A
+  tmux select-window -t <session-id>:1   # Trajectory A
+  tmux select-window -t <session-id>:2   # Trajectory B
   ```
 - Consider using "trust mode" (Shift+Tab) if you dont want permission prompts
 
@@ -780,8 +784,8 @@ grep -i "timeout" /path/to/session/dir/debug.txt
 # List all tmux sessions
 tmux ls
 
-# Attach to trajectory A
-tmux attach -t <session-id>-A
+# Switch to trajectory A window
+tmux select-window -t <session-id>:1
 
 # Detach from tmux (without killing it)
 # Press: Ctrl+B then D

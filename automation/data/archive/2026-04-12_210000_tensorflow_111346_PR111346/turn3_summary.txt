@@ -1,0 +1,13 @@
+=== Trajectory A -- Modified/New files ===
+jadx-core/src/main/java/jadx/core/dex/nodes/BlockNode.java
+jadx-core/src/main/java/jadx/core/dex/visitors/blocks/BlockProcessor.java
+jadx-core/src/main/java/jadx/core/dex/visitors/blocks/DominatorTree.java
+jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.java
+jadx-core/src/main/java/jadx/core/utils/BlockUtils.java
+
+=== Trajectory B -- Modified/New files ===
+jadx-core/src/main/java/jadx/core/dex/nodes/BlockNode.java
+jadx-core/src/main/java/jadx/core/dex/visitors/blocks/BlockProcessor.java
+jadx-core/src/main/java/jadx/core/dex/visitors/blocks/DominatorTree.java
+jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.java
+jadx-core/src/main/java/jadx/core/utils/BlockUtils.java

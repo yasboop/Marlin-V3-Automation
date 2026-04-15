@@ -1,0 +1,7 @@
+Looking at the MSA changes from the previous turn ,a couple of things still need fixing.
+
+1. options.cc is not getting updated for the enable_conditional_redundant_eviction_elimination flag. The ToString and proto serialization methods need to include it ,otherwise the setting is basically invisible in debug output and gets lost on any proto round-trip. Same pattern as the existing enable_while_redundant_eviction_elimination flag that is already sitting in options.cc.
+
+2. In MaybeCreateMirroredAllocationForConditionalUse in algorithm.cc ,the parameter_use loop that is computing min_use_time only checks timing constraints. It is not verifying is_use_allowed_in_alternate_mem_fn for each use inside the branch computations. Right now the check is only running at the conditional use level in the outer loop but thats not catching cases where an individual instruction inside a branch needs the buffer in default memory. Add is_use_allowed_in_alternate_mem_fn verification for each parameter_use inside that loop.
+
+3. For test coverage ,add a test case where one branch of the conditional has a use that requires default memory. The optimization should fall back to eviction for that case even though the other branch is fine with alternate memory. This is basically testing the gap from point 2

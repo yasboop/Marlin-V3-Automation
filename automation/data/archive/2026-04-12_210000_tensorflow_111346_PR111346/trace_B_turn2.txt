@@ -1,0 +1,1178 @@
+ ▐▛███▜▌   Claude Code v2.1.85
+▝▜█████▛▘  capybara-v9-prod with high effort · API Usage Billing
+  ▘▘ ▝▝    ~/.cache/claude-hfi/-Users-yashverma-Downloads-jadx-2054/B
+
+  Debug mode enabled
+  Logging to: /var/folders/wv/zplv7lv92m32p0l4fs0gj_qr0000gn/T/claude-hfi/54b
+  a2019-7715-46ac-b630-5674af9fcf44/debug.txt
+
+❯ The processSwitch method in RegionMaker is taking a surprisingly large
+share of total decompilation time. Profiling shows the bottleneck is in
+post-dominator computation - right now BlockUtils.calcPostDominance and
+calcPartialPostDominance are getting called repeatedly during switch case
+processing, each time building a fresh HashMap from scratch for almost every
+ case in every switch. Apps that went through Redex optimization tend to
+have lots of large switches which makes this really noticeable.
+
+The dominator tree is already computed once per method and cached on
+BlockNode (the doms and idom fields). Post-dominators should work the same
+way - compute them once during block processing, store them on the block
+nodes, and then RegionMaker can just read the cached info instead of
+recomputing.
+
+The existing DominatorTree uses an iterative algorithm that should be
+reusable for post-dominators if you reverse the graph traversal direction.
+Post-dominator computation walks backwards from the exit block and uses
+successors where the forward computation uses predecessors.
+
+After caching post-dom info on block nodes, the switch out-block search and
+fallthrough detection in RegionMaker needs to be updated to use it instead
+of the old on-demand calculations. The old utility methods in BlockUtils for
+ partial post-dominance wont be needed anymore, those should go. The DFS
+traversal in BlockUtils needs to support reverse direction for the backwards
+ walk. All existing tests including the switch decompilation tests should
+pass without issues.
+
+  Searched for 4 patterns, read 6 files (ctrl+o to expand)
+
+⏺ Now I'll implement the changes.
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/nodes/BlockNode.java)
+  ⎿  Added 10 lines
+      61     */
+      62    private List<BlockNode> dominatesOn = new ArrayList<>(3);
+      63
+      64 +  /**
+      65 +   * All post-dominators, excluding self
+      66 +   */
+      67 +  private BitSet postDoms = EmptyBitSet.EMPTY;
+      68 +
+      69 +  /**
+      70 +   * Immediate post-dominator
+      71 +   */
+      72 +  private BlockNode ipostdom;
+      73 +
+      74    public BlockNode(int cid, int id, int offset) {
+      75      this.cid = cid;
+      76      this.id = id;
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/nodes/BlockNode.java)
+  ⎿  Added 22 lines
+      202      dominatesOn.add(block);
+      203    }
+      204
+      205 +  /**
+      206 +   * Post-dominators of this node (exclude itself)
+      207 +   */
+      208 +  public BitSet getPostDoms() {
+      209 +    return postDoms;
+      210 +  }
+      211 +
+      212 +  public void setPostDoms(BitSet postDoms) {
+      213 +    this.postDoms = postDoms;
+      214 +  }
+      215 +
+      216 +  /**
+      217 +   * Immediate post-dominator
+      218 +   */
+      219 +  public BlockNode getIPostDom() {
+      220 +    return ipostdom;
+      221 +  }
+      222 +
+      223 +  public void setIPostDom(BlockNode ipostdom) {
+      224 +    this.ipostdom = ipostdom;
+      225 +  }
+      226 +
+      227    public boolean isSynthetic() {
+      228      return contains(AFlag.SYNTHETIC);
+      229    }
+
+⏺ Now the reverse DFS in BlockUtils:
+
+⏺ Update(jadx-core/src/main/java/jadx/core/utils/BlockUtils.java)
+  ⎿  Added 18 lines, removed 6 lines
+      483
+      484    public static List<BlockNode> collectAllSuccessors(Method
+           Node mth, BlockNode startBlock, boolean clean) {
+      485      List<BlockNode> list = new ArrayList<>(mth.getBasicBloc
+           ks().size());
+      486 -    dfsVisit(mth, startBlock, clean, list::add);
+      486 +    dfsVisit(mth, startBlock, clean, false, list::add);
+      487      return list;
+      488    }
+      489
+      490    public static void dfsVisit(MethodNode mth, Consumer<Bloc
+           kNode> visitor) {
+      491 -    dfsVisit(mth, mth.getEnterBlock(), false, visitor);
+      491 +    dfsVisit(mth, mth.getEnterBlock(), false, false, visito
+          +r);
+      492    }
+      493
+      494 -  private static void dfsVisit(MethodNode mth, BlockNode st
+          -artBlock, boolean clean, Consumer<BlockNode> visitor) {
+      494 +  /**
+      495 +   * DFS over the reversed CFG, starting from the method ex
+          +it block and following predecessors.
+      496 +   */
+      497 +  public static void reverseDfsVisit(MethodNode mth, Consum
+          +er<BlockNode> visitor) {
+      498 +    dfsVisit(mth, mth.getExitBlock(), false, true, visitor)
+          +;
+      499 +  }
+      500 +
+      501 +  private static void dfsVisit(MethodNode mth, BlockNode st
+          +artBlock, boolean clean, boolean reverse, Consumer<BlockNod
+          +e> visitor) {
+      502      BitSet visited = newBlocksBitSet(mth);
+      503      Deque<BlockNode> queue = new ArrayDeque<>();
+      504      queue.addLast(startBlock);
+     ...
+      509          return;
+      510        }
+      511        visitor.accept(current);
+      505 -      List<BlockNode> successors = clean ? current.getClean
+          -Successors() : current.getSuccessors();
+      506 -      int count = successors.size();
+      512 +      List<BlockNode> nextBlocks;
+      513 +      if (reverse) {
+      514 +        nextBlocks = current.getPredecessors();
+      515 +      } else {
+      516 +        nextBlocks = clean ? current.getCleanSuccessors() :
+          + current.getSuccessors();
+      517 +      }
+      518 +      int count = nextBlocks.size();
+      519        for (int i = count - 1; i >= 0; i--) { // to preserve
+            order in queue
+      508 -        BlockNode next = successors.get(i);
+      520 +        BlockNode next = nextBlocks.get(i);
+      521          int nextId = next.getId();
+      522          if (!visited.get(nextId)) {
+      523            queue.addLast(next);
+
+⏺ Now generalize DominatorTree to support post-dominators:
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/blocks/DominatorTree.
+        java)
+  ⎿  Added 2 lines
+       1  package jadx.core.dex.visitors.blocks;
+       2
+       3  import java.util.ArrayList;
+       4 +import java.util.Arrays;
+       5  import java.util.BitSet;
+       6  import java.util.List;
+       7 +import java.util.function.Function;
+       8
+       9  import org.jetbrains.annotations.NotNull;
+      10
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/blocks/DominatorTree.
+        java)
+  ⎿  Added 76 lines, removed 29 lines
+      25
+      26    public static void compute(MethodNode mth) {
+      27      List<BlockNode> sorted = sortBlocks(mth);
+      28 -    BlockNode[] doms = build(sorted);
+      29 -    apply(sorted, doms);
+      28 +    int[] pos = identityPos(sorted.size());
+      29 +    BlockNode[] doms = build(sorted, pos, BlockNode::getPred
+         +ecessors);
+      30 +    apply(sorted, pos, doms);
+      31    }
+      32
+      33 +  public static void computePost(MethodNode mth) {
+      34 +    int blocksCount = mth.getBasicBlocks().size();
+      35 +    List<BlockNode> sorted = new ArrayList<>(blocksCount);
+      36 +    BlockUtils.reverseDfsVisit(mth, sorted::add);
+      37 +    int[] pos = buildPos(sorted, blocksCount);
+      38 +    BlockNode[] doms = build(sorted, pos, BlockNode::getSucc
+         +essors);
+      39 +    applyPost(mth, sorted, pos, doms);
+      40 +  }
+      41 +
+      42    private static List<BlockNode> sortBlocks(MethodNode mth)
+          {
+      43      int blocksCount = mth.getBasicBlocks().size();
+      44      List<BlockNode> sorted = new ArrayList<>(blocksCount);
+     ...
+       50      return sorted;
+       51    }
+       52
+       53 +  private static int[] identityPos(int size) {
+       54 +    int[] pos = new int[size];
+       55 +    for (int i = 0; i < size; i++) {
+       56 +      pos[i] = i;
+       57 +    }
+       58 +    return pos;
+       59 +  }
+       60 +
+       61 +  private static int[] buildPos(List<BlockNode> sorted, int
+          + blocksCount) {
+       62 +    int[] pos = new int[blocksCount];
+       63 +    Arrays.fill(pos, -1);
+       64 +    int size = sorted.size();
+       65 +    for (int i = 0; i < size; i++) {
+       66 +      pos[sorted.get(i).getId()] = i;
+       67 +    }
+       68 +    return pos;
+       69 +  }
+       70 +
+       71    @NotNull
+       44 -  private static BlockNode[] build(List<BlockNode> sorted)
+          -{
+       72 +  private static BlockNode[] build(List<BlockNode> sorted,
+          +int[] pos, Function<BlockNode, List<BlockNode>> preds) {
+       73      int blocksCount = sorted.size();
+       74      BlockNode[] doms = new BlockNode[blocksCount];
+       75      doms[0] = sorted.get(0);
+       76      boolean changed = true;
+       77      while (changed) {
+       78        changed = false;
+       51 -      for (int blockId = 1; blockId < blocksCount; blockId+
+          -+) {
+       52 -        BlockNode b = sorted.get(blockId);
+       53 -        List<BlockNode> preds = b.getPredecessors();
+       79 +      for (int i = 1; i < blocksCount; i++) {
+       80 +        BlockNode b = sorted.get(i);
+       81 +        List<BlockNode> predList = preds.apply(b);
+       82          int pickedPred = -1;
+       83          BlockNode newIDom = null;
+       56 -        for (BlockNode pred : preds) {
+       57 -          int id = pred.getId();
+       58 -          if (doms[id] != null) {
+       84 +        for (BlockNode pred : predList) {
+       85 +          int p = pos[pred.getId()];
+       86 +          if (p != -1 && doms[p] != null) {
+       87              newIDom = pred;
+       60 -            pickedPred = id;
+       88 +            pickedPred = p;
+       89              break;
+       90            }
+       91          }
+       92          if (newIDom == null) {
+       93            throw new JadxRuntimeException("No predecessors f
+           or block: " + b);
+       94          }
+       67 -        for (BlockNode predBlock : preds) {
+       68 -          int predId = predBlock.getId();
+       69 -          if (predId == pickedPred) {
+       95 +        for (BlockNode predBlock : predList) {
+       96 +          int predPos = pos[predBlock.getId()];
+       97 +          if (predPos == -1 || predPos == pickedPred) {
+       98              continue;
+       99            }
+       72 -          if (doms[predId] != null) {
+       73 -            newIDom = intersect(sorted, doms, predBlock, ne
+          -wIDom);
+      100 +          if (doms[predPos] != null) {
+      101 +            newIDom = intersect(sorted, pos, doms, predBloc
+          +k, newIDom);
+      102            }
+      103          }
+       76 -        if (doms[blockId] != newIDom) {
+       77 -          doms[blockId] = newIDom;
+      104 +        if (doms[i] != newIDom) {
+      105 +          doms[i] = newIDom;
+      106            changed = true;
+      107          }
+      108        }
+     ...
+      110      return doms;
+      111    }
+      112
+       85 -  private static BlockNode intersect(List<BlockNode> sorted
+          -, BlockNode[] doms, BlockNode b1, BlockNode b2) {
+       86 -    int f1 = b1.getId();
+       87 -    int f2 = b2.getId();
+      113 +  private static BlockNode intersect(List<BlockNode> sorted
+          +, int[] pos, BlockNode[] doms, BlockNode b1, BlockNode b2)
+          +{
+      114 +    int f1 = pos[b1.getId()];
+      115 +    int f2 = pos[b2.getId()];
+      116      while (f1 != f2) {
+      117        while (f1 > f2) {
+       90 -        f1 = doms[f1].getId();
+      118 +        f1 = pos[doms[f1].getId()];
+      119        }
+      120        while (f2 > f1) {
+       93 -        f2 = doms[f2].getId();
+      121 +        f2 = pos[doms[f2].getId()];
+      122        }
+      123      }
+      124      return sorted.get(f1);
+      125    }
+      126
+       99 -  private static void apply(List<BlockNode> sorted, BlockNo
+          -de[] doms) {
+      127 +  private static void apply(List<BlockNode> sorted, int[] p
+          +os, BlockNode[] doms) {
+      128      BlockNode enterBlock = sorted.get(0);
+      129      enterBlock.setDoms(EmptyBitSet.EMPTY);
+      130      enterBlock.setIDom(null);
+     ...
+      134        BlockNode idom = doms[i];
+      135        block.setIDom(idom);
+      136        idom.addDominatesOn(block);
+      109 -      BitSet domBS = collectDoms(doms, idom);
+      110 -      domBS.clear(i);
+      137 +      BitSet domBS = collectDoms(blocksCount, pos, doms, id
+          +om, BlockNode::getDoms);
+      138 +      domBS.clear(block.getId());
+      139        block.setDoms(domBS);
+      140      }
+      141    }
+      142
+      115 -  private static BitSet collectDoms(BlockNode[] doms, Block
+          -Node idom) {
+      116 -    BitSet domBS = new BitSet(doms.length);
+      143 +  private static void applyPost(MethodNode mth, List<BlockN
+          +ode> sorted, int[] pos, BlockNode[] doms) {
+      144 +    // blocks with no path to exit (e.g. endless loops) get
+          + empty info
+      145 +    for (BlockNode block : mth.getBasicBlocks()) {
+      146 +      block.setPostDoms(EmptyBitSet.EMPTY);
+      147 +      block.setIPostDom(null);
+      148 +    }
+      149 +    int mthBlocksCount = mth.getBasicBlocks().size();
+      150 +    int blocksCount = sorted.size();
+      151 +    for (int i = 1; i < blocksCount; i++) {
+      152 +      BlockNode block = sorted.get(i);
+      153 +      BlockNode ipdom = doms[i];
+      154 +      block.setIPostDom(ipdom);
+      155 +      BitSet domBS = collectDoms(mthBlocksCount, pos, doms,
+          + ipdom, BlockNode::getPostDoms);
+      156 +      domBS.clear(block.getId());
+      157 +      block.setPostDoms(domBS);
+      158 +    }
+      159 +  }
+      160 +
+      161 +  private static BitSet collectDoms(int blocksCount, int[]
+          +pos, BlockNode[] doms, BlockNode idom,
+      162 +      Function<BlockNode, BitSet> collected) {
+      163 +    BitSet domBS = new BitSet(blocksCount);
+      164      BlockNode nextIDom = idom;
+      165      while (true) {
+      166        int id = nextIDom.getId();
+     ...
+      168          break;
+      169        }
+      170        domBS.set(id);
+      124 -      BitSet curDoms = nextIDom.getDoms();
+      171 +      BitSet curDoms = collected.apply(nextIDom);
+      172        if (curDoms != null) {
+      173          // use already collected set
+      174          domBS.or(curDoms);
+      175          break;
+      176        }
+      130 -      nextIDom = doms[id];
+      177 +      nextIDom = doms[pos[id]];
+      178      }
+      179      return domBS;
+      180    }
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/blocks/DominatorTree.
+        java)
+  ⎿  Added 13 lines, removed 3 lines
+      141    }
+      142
+      143    private static void applyPost(MethodNode mth, List<BlockN
+           ode> sorted, int[] pos, BlockNode[] doms) {
+      144 -    // blocks with no path to exit (e.g. endless loops) get
+          - empty info
+      145 -    for (BlockNode block : mth.getBasicBlocks()) {
+      146 -      block.setPostDoms(EmptyBitSet.EMPTY);
+      144 +    for (BlockNode block : sorted) {
+      145 +      block.setPostDoms(null);
+      146        block.setIPostDom(null);
+      147      }
+      148 +    BlockNode exitBlock = sorted.get(0);
+      149 +    exitBlock.setPostDoms(EmptyBitSet.EMPTY);
+      150      int mthBlocksCount = mth.getBasicBlocks().size();
+      151      int blocksCount = sorted.size();
+      152      for (int i = 1; i < blocksCount; i++) {
+     ...
+      157        domBS.clear(block.getId());
+      158        block.setPostDoms(domBS);
+      159      }
+      160 +    if (blocksCount != mthBlocksCount) {
+      161 +      // blocks with no path to exit (e.g. endless loops) g
+          +et empty info
+      162 +      for (BlockNode block : mth.getBasicBlocks()) {
+      163 +        if (pos[block.getId()] == -1) {
+      164 +          block.setPostDoms(EmptyBitSet.EMPTY);
+      165 +          block.setIPostDom(null);
+      166 +        }
+      167 +      }
+      168 +    }
+      169    }
+      170
+      171    private static BitSet collectDoms(int blocksCount, int[]
+           pos, BlockNode[] doms, BlockNode idom,
+
+⏺ Now wire it into BlockProcessor:
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/blocks/BlockProcessor
+        .java)
+  ⎿  Added 1 line
+      67      checkForUnreachableBlocks(mth);
+      68
+      69      DominatorTree.computeDominanceFrontier(mth);
+      70 +    DominatorTree.computePost(mth);
+      71      registerLoops(mth);
+      72      processNestedLoops(mth);
+      73
+
+⏺ Now update RegionMaker to use cached post-dom info:
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.j
+        ava)
+  ⎿  Added 2 lines, removed 4 lines
+      887      if (df.intersects(caseBlocks)) {
+      888        return getOneIntersectionBlock(out, caseBlocks, df);
+      889      }
+      890 -    Set<BlockNode> allPathsBlocks = BlockUtils.getAllPathsB
+          -locks(successor, out);
+      891 -    Map<BlockNode, BitSet> bitSetMap = BlockUtils.calcParti
+          -alPostDominance(mth, allPathsBlocks, out);
+      892 -    BitSet pdoms = bitSetMap.get(successor);
+      893 -    if (pdoms != null && pdoms.intersects(caseBlocks)) {
+      890 +    BitSet pdoms = successor.getPostDoms();
+      891 +    if (pdoms.intersects(caseBlocks)) {
+      892        return getOneIntersectionBlock(out, caseBlocks, pdoms
+           );
+      893      }
+      894      return null;
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.j
+        ava)
+  ⎿  Added 1 line, removed 1 line
+      798      BlockNode out;
+      799      LoopInfo loop = mth.getLoopForBlock(block);
+      800      if (loop == null) {
+      801 -      out = calcPostDomOut(mth, block, mth.getPreExitBlocks
+          -());
+      801 +      out = block.getIPostDom();
+      802      } else {
+      803        BlockNode loopEnd = loop.getEnd();
+      804        stack.addExit(loop.getStart());
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.j
+        ava)
+  ⎿  Added 5 lines, removed 13 lines
+      906    private static BlockNode calcPostDomOut(MethodNode mth, B
+           lockNode block, List<BlockNode> exits) {
+      907      if (exits.size() == 1 && mth.getExitBlock().equals(exit
+           s.get(0))) {
+      908        // simple case: for only one exit which is equal to m
+           ethod exit block
+      909 -      return BlockUtils.calcImmediatePostDominator(mth, blo
+          -ck);
+      909 +      return block.getIPostDom();
+      910      }
+      911      // fast search: union of blocks dominance frontier
+      912      // work if no fallthrough cases and no returns inside s
+           witch
+     ...
+      917      outs.clear(block.getId());
+      918
+      919      if (outs.cardinality() != 1) {
+      920 -      // slow search: calculate partial post-dominance for
+          -every exit node
+      921 -      BitSet ipdoms = BlockUtils.newBlocksBitSet(mth);
+      922 -      for (BlockNode exitBlock : exits) {
+      923 -        if (BlockUtils.isAnyPathExists(block, exitBlock)) {
+      924 -          Set<BlockNode> pathBlocks = BlockUtils.getAllPath
+          -sBlocks(block, exitBlock);
+      925 -          BlockNode ipdom = BlockUtils.calcPartialImmediate
+          -PostDominator(mth, block, pathBlocks, exitBlock);
+      926 -          if (ipdom != null) {
+      927 -            ipdoms.set(ipdom.getId());
+      928 -          }
+      929 -        }
+      930 -      }
+      931 -      outs.and(ipdoms);
+      920 +      // remove candidates that post-dominate other candida
+ ▐▛███▜▌   Claude Code v2.1.85
+▝▜█████▛▘  Opus 4.6 · API Usage Billing
+  ▘▘ ▝▝    ~/.cache/claude-hfi/-Users-yashverma-Downloads-jadx-2054/B
+
+  Debug mode enabled
+  Logging to: /var/folders/wv/zplv7lv92m32p0l4fs0gj_qr0000gn/T/claude-hfi/54b
+  a2019-7715-46ac-b630-5674af9fcf44/debug.txt
+
+❯ /clear
+  ⎿  (no content)
+
+❯ TestSwitchContinue and TestSwitchBreak were the last two failing tests
+before the session ended and havent been verified since. Run the switch
+tests first - if they still fail ,the problem is in how calcSwitchOut and
+processSwitch handle switches inside loops ,the continue insertion path isnt
+ correctly finding the out block when the cached ipdom points back towards
+the loop header.
+
+Also three LOG.warn debug statements are sitting in RegionMaker that were
+left from a debugging pass ,and sortBlocksReverse in DominatorTree has an
+idMap array thats built but never actually used. Those should go ,and the
+whole test suite should pass without issues
+
+❯ TestSwitchContinue and TestSwitchBreak were the last two failing tests
+before the session ended and havent been verified since. Run the switch
+tests first - if they still fail ,the problem is in how calcSwitchOut and
+processSwitch handle switches inside loops ,the continue insertion path isnt
+ correctly finding the out block when the cached ipdom points back towards
+the loop header.
+
+Also three LOG.warn debug statements are sitting in RegionMaker that were
+left from a debugging pass ,and sortBlocksReverse in DominatorTree has an
+idMap array thats built but never actually used. Those should go ,and the
+whole test suite should pass without issues
+
+⏺ Let me run the switch tests first and read the relevant files in parallel.
+
+⏺ Bash(./gradlew :jadx-core:test --tests
+      "jadx.tests.integration.switches.TestSwitchContinue" --tests
+      "jadx.tests.integration.switches.TestSwitchBreak" --no-daemon 2>&…)
+  ⎿          at app//org.junit.jupiter.api.AssertionFailureBuilder.build
+     (AssertionFailureBuilder.java:151)
+             at app//org.junit.jupiter.api.AssertionFailureBuilder.build
+     … +34 lines (ctrl+o to expand)
+  ⎿  (timeout 2m)
+
+⏺ Both tests fail. Let me read the relevant code.
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Now let me read the DominatorTree and the test files.
+
+  Searched for 1 pattern, read 3 files (ctrl+o to expand)
+
+⏺ Let me see the actual decompiled output to understand what's going wrong.
+
+⏺ Bash(./gradlew :jadx-core:test --tests
+      "jadx.tests.integration.switches.TestSwitchContinue" --no-daemon 2>&1 |
+       grep -A 50 "FAILED\|expected\|but was\|Decompiled\|WAR…)
+  ⎿  > Task :jadx-core:test FAILED
+
+     TestSwitchContinue > test() FAILED
+     … +17 lines (ctrl+o to expand)
+  ⎿  (timeout 2m)
+
+⏺ The test expects 4 case  occurrences but finds 5. The issue is the
+  decompiled output has an extra case (likely a default: being generated).
+  The problem is in calcSwitchOut — when inside a loop, the ipdom points to
+  the loop header, so it falls through to the fallback path. Let me check the
+   actual output by adding some debug.
+
+⏺ Bash(./gradlew :jadx-core:test --tests
+      "jadx.tests.integration.switches.TestSwitchContinue" --no-daemon
+      -Djadx.test.dumpCode=true 2>&1 | grep -E "WARN|case |switch|c…)
+  ⎿          at app//jadx.tests.integration.switches.TestSwitchContinue.
+     test(TestSwitchContinue.java:44)
+  ⎿  (timeout 2m)
+
+⏺ Let me look for the test HTML report or find another way to see the output.
+
+  Searched for 2 patterns (ctrl+o to expand)
+
+⏺ Let me look at IntegrationTest to understand how to get the decompiled code
+   printed.
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+⏺ The test always prints the decompiled code. Let me capture stdout.
+
+⏺ Bash(./gradlew :jadx-core:test --tests
+      "jadx.tests.integration.switches.TestSwitchContinue" --no-daemon --info
+       2>&1 | grep -A 100 "^---" | head -60)
+  ⎿  (No output)
+  ⎿  (timeout 2m)
+
+⏺ Bash(./gradlew :jadx-core:test --tests
+      "jadx.tests.integration.switches.TestSwitchContinue" --no-daemon -i
+      2>&1 | grep -B2 -A100 "case \|switch\|while" | head -80)
+  ⎿      Compiler diagnostic: warning: unknown enum constant org.apiguar
+     dian.api.API.Status.STABLE
+         INFO  - Using dex input
+     … +73 lines (ctrl+o to expand)
+  ⎿  (timeout 2m)
+
+⏺ Now I can see the issue clearly. The decompiled output has no out block for
+   the switch - the s += "-"; a--; code is being duplicated into each case.
+  The WARN log shows out=B:16:0x0002 loopStart=B:3:0x0002 — different block
+  objects at the same offset.
+
+  The problem: calcSwitchOut returns the ipdom (B:16) without falling back
+  because isLoopStartBlock doesn't recognize B:16 as loop-start-equivalent.
+  Then processSwitch also doesn't catch it with out == loop.getStart().
+
+  Let me check the loop info available.
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+⏺ Let me check what BlockNode stores for post-dominators.
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Now I understand the full picture. The core issue is in calcSwitchOut: when
+   the switch is inside a loop, the ipdom (B:16) is outside the loop blocks
+  but isn't caught by isLoopStartBlock. The fix needs to:
+
+  1. In calcSwitchOut: reject ipdom if it's not in the loop's block set;
+  filter fallback candidates similarly
+  2. In processSwitch: use isLoopStartBlock + loop block containment check
+  3. Remove the 3 LOG.warn debug statements
+  4. Remove unused idMap array in sortBlocksReverse
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.j
+        ava)
+  ⎿  Added 10 lines, removed 3 lines
+      914      // use cached immediate post-dominator
+      915      BlockNode ipdom = block.getIPostDom();
+      916      if (ipdom != null && ipdom != mth.getExitBlock()) {
+      917 -      if (loop == null || !isLoopStartBlock(ipdom, loop)) {
+      917 +      if (loop == null
+      918 +          || (loop.getLoopBlocks().contains(ipdom) && !isLo
+          +opStartBlock(ipdom, loop))) {
+      919          return ipdom;
+      920        }
+      921      }
+      922      // fallback: dom frontier union filtered by dominance
+      922 -    LOG.warn("calcSwitchOut FALLBACK: block={} ipdom={} loo
+          -pStart={}", block, ipdom, loop != null ? loop.getStart() :
+          -"no-loop");
+      923      BitSet outs = BlockUtils.copyBlocksBitSet(mth, block.ge
+           tDomFrontier());
+      924      for (BlockNode s : block.getCleanSuccessors()) {
+      925        outs.or(s.getDomFrontier());
+     ...
+      928      outs.clear(mth.getExitBlock().getId());
+      929      if (loop != null) {
+      930        outs.clear(loop.getStart().getId());
+      931 +      // clear blocks outside the loop (e.g. synthetic bloc
+          +ks redirecting to loop header)
+      932 +      Set<BlockNode> loopBlocks = loop.getLoopBlocks();
+      933 +      List<BlockNode> allBlocks = mth.getBasicBlocks();
+      934 +      for (int i = outs.nextSetBit(0); i >= 0; i = outs.nex
+          +tSetBit(i + 1)) {
+      935 +        if (!loopBlocks.contains(allBlocks.get(i))) {
+      936 +          outs.clear(i);
+      937 +        }
+      938 +      }
+      939      }
+      932 -    LOG.warn("calcSwitchOut FALLBACK: outs={} card={}", out
+          -s, outs.cardinality());
+      940      if (outs.cardinality() == 1) {
+      941        return BlockUtils.bitSetToOneBlock(mth, outs);
+      942      }
+
+⏺ Now add the missing Set import and fix the processSwitch loop check:
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.j
+        ava)
+  ⎿  Added 2 lines, removed 2 lines
+      808          out = null;
+      809        } else {
+      810          out = calcSwitchOut(mth, block);
+      811 -        LOG.warn("SWITCH-LOOP: block={} out={} loopStart={}
+          -", block, out, loop.getStart());
+      811          if (out != null) {
+      813 -          if (out == loop.getStart() || out == mth.getExitB
+          -lock()) {
+      812 +          if (isLoopStartBlock(out, loop) || out == mth.get
+          +ExitBlock()
+      813 +              || !loop.getLoopBlocks().contains(out)) {
+      814              out = null;
+      815            } else {
+      816              // insert 'continue' only when some case bypass
+           es the out block
+
+⏺ Now remove the remaining LOG.warn in the fallback. Let me check what's
+  left:
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+⏺ Good, all LOG.warn statements are gone. Now fix the unused idMap in
+  DominatorTree's sortBlocksReverse:
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/blocks/DominatorTree.
+        java)
+  ⎿  Removed 5 lines
+      155          }
+      156        }
+      157      }
+      158 -    // Build id mapping: position in sorted list
+      159 -    int[] idMap = new int[blocksCount];
+      160 -    for (int i = 0; i < sorted.size(); i++) {
+      161 -      idMap[sorted.get(i).getId()] = i;
+      162 -    }
+      158      return sorted;
+      159    }
+      160
+
+⏺ Now let me also add the Set import that's needed for the new Set<BlockNode>
+   usage in calcSwitchOut:
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+⏺ Good, Set is already imported. Now run the switch tests:
+
+⏺ Bash(./gradlew :jadx-core:test --tests
+      "jadx.tests.integration.switches.TestSwitchContinue" --tests
+      "jadx.tests.integration.switches.TestSwitchBreak" --no-daemon -i…)
+  ⎿  TestSwitchContinue > test() STANDARD_OUT
+     TestSwitchBreak > test() STANDARD_OUT
+     TestSwitchContinue > test() STANDARD_OUT
+     … +61 lines (ctrl+o to expand)
+  ⎿  (timeout 2m)
+
+⏺ Bash(./gradlew :jadx-core:test --tests
+      "jadx.tests.integration.switches.TestSwitchContinue" --tests
+      "jadx.tests.integration.switches.TestSwitchBreak" --no-daemon 2>&…)
+  ⎿          at app//jadx.tests.integration.switches.TestSwitchBreak.tes
+     t(TestSwitchBreak.java:46)
+     … +15 lines (ctrl+o to expand)
+  ⎿  (timeout 2m)
+
+⏺ Still failing. Let me see the actual decompiled output now:
+
+⏺ Bash(./gradlew :jadx-core:test --tests
+      "jadx.tests.integration.switches.TestSwitchContinue" --no-daemon -i
+      2>&1 | grep -A 40 "^    ---")
+  ⎿      -----------------------------------------------------------
+         package jadx.tests.integration.switches;
+     … +41 lines (ctrl+o to expand)
+  ⎿  (timeout 2m)
+
+⏺ Same output. Let me verify the code changes took effect and add temporary
+  debug to understand the flow.
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Let me add temporary debug logging to see what calcSwitchOut is doing:
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.j
+        ava)
+  ⎿  Added 5 lines
+      914      // use cached immediate post-dominator
+      915      BlockNode ipdom = block.getIPostDom();
+      916      if (ipdom != null && ipdom != mth.getExitBlock()) {
+      917 +      boolean inLoop = loop != null;
+      918 +      boolean containsIpdom = inLoop && loop.getLoopBlocks(
+          +).contains(ipdom);
+      919 +      boolean isStart = inLoop && isLoopStartBlock(ipdom, l
+          +oop);
+      920 +      LOG.warn("calcSwitchOut: block={} ipdom={} inLoop={}
+          +containsIpdom={} isStart={}", block, ipdom, inLoop, contain
+          +sIpdom, isStart);
+      921        if (loop == null
+      922            || (loop.getLoopBlocks().contains(ipdom) && !isLo
+           opStartBlock(ipdom, loop))) {
+      923          return ipdom;
+     ...
+      941          }
+      942        }
+      943      }
+      944 +    LOG.warn("calcSwitchOut FALLBACK: block={} outs={} card
+          +={}", block, outs, outs.cardinality());
+      945      if (outs.cardinality() == 1) {
+      946        return BlockUtils.bitSetToOneBlock(mth, outs);
+      947      }
+
+⏺ Bash(./gradlew :jadx-core:test --tests
+      "jadx.tests.integration.switches.TestSwitchContinue" --no-daemon -i
+      2>&1 | grep "WARN\|calcSwitchOut")
+  ⎿      WARN  - calcSwitchOut: block=B:5:0x0006 ipdom=B:16:0x0002 inLoo
+     p=true containsIpdom=true isStart=false
+  ⎿  (timeout 2m)
+
+⏺ containsIpdom=true and isStart=false — B:16 IS in the loop but isn't
+  recognized as the loop start. B:16 is at offset 0x0002 (same as loop start)
+   — it's the loop condition block. The ipdom correctly converges there, but
+  it's wrong as a switch out block because it's above the switch in the CFG.
+
+  The fix: if the ipdom dominates the switch block, it's a loop header, not a
+   merge point below the switch.
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.j
+        ava)
+  ⎿  Added 3 lines, removed 6 lines
+      914      // use cached immediate post-dominator
+      915      BlockNode ipdom = block.getIPostDom();
+      916      if (ipdom != null && ipdom != mth.getExitBlock()) {
+      917 -      boolean inLoop = loop != null;
+      918 -      boolean containsIpdom = inLoop && loop.getLoopBlocks(
+          -).contains(ipdom);
+      919 -      boolean isStart = inLoop && isLoopStartBlock(ipdom, l
+          -oop);
+      920 -      LOG.warn("calcSwitchOut: block={} ipdom={} inLoop={}
+          -containsIpdom={} isStart={}", block, ipdom, inLoop, contain
+          -sIpdom, isStart);
+      917        if (loop == null
+      922 -          || (loop.getLoopBlocks().contains(ipdom) && !isLo
+          -opStartBlock(ipdom, loop))) {
+      918 +          || (loop.getLoopBlocks().contains(ipdom)
+      919 +              && !isLoopStartBlock(ipdom, loop)
+      920 +              && !block.isDominator(ipdom))) {
+      921          return ipdom;
+      922        }
+      923      }
+     ...
+      939          }
+      940        }
+      941      }
+      944 -    LOG.warn("calcSwitchOut FALLBACK: block={} outs={} card
+          -={}", block, outs, outs.cardinality());
+      942      if (outs.cardinality() == 1) {
+      943        return BlockUtils.bitSetToOneBlock(mth, outs);
+      944      }
+
+⏺ Bash(./gradlew :jadx-core:test --tests
+      "jadx.tests.integration.switches.TestSwitchContinue" --tests
+      "jadx.tests.integration.switches.TestSwitchBreak" --no-daemon 2>&…)
+  ⎿  * What went wrong:
+     Execution failed for task ':jadx-core:test'.
+     > There were failing tests. See the report at: file:///Users/yashve
+     … +8 lines (ctrl+o to expand)
+  ⎿  (timeout 2m)
+
+⏺ Bash(./gradlew :jadx-core:test --tests
+      "jadx.tests.integration.switches.TestSwitchContinue" --no-daemon -i
+      2>&1 | grep -A 40 "^    ---")
+  ⎿      -----------------------------------------------------------
+         package jadx.tests.integration.switches;
+     … +41 lines (ctrl+o to expand)
+  ⎿  (timeout 2m)
+
+⏺ Bash(./gradlew :jadx-core:test --tests
+      "jadx.tests.integration.switches.TestSwitchContinue" --no-daemon -i
+      2>&1 | grep "WARN")
+  ⎿  No matches found
+  ⎿  (timeout 2m)
+
+⏺ No WARN output — might be a build cache issue. Let me force a clean build:
+
+⏺ Bash(./gradlew :jadx-core:clean :jadx-core:test --tests
+      "jadx.tests.integration.switches.TestSwitchContinue" --no-daemon -i
+      2>&1 | grep "WARN\|calcSwitchOut\|FALLBAC…)
+  ⎿  No matches found
+  ⎿  (timeout 3m)
+
+⏺ Bash(./gradlew :jadx-core:clean :jadx-core:test --tests
+      "jadx.tests.integration.switches.TestSwitchContinue" --no-daemon -i
+      2>&1 | grep -E "WARN|---" | head -20)
+  ⎿      -----------------------------------------------------------
+         -----------------------------------------------------------
+  ⎿  (timeout 3m)
+
+⏺ Let me verify what's actually in the method now:
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Let me check how block IDs are set after sorting:
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+⏺ Let me add targeted debug to see what's happening step by step:
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.j
+        ava)
+  ⎿  Added 6 lines, removed 3 lines
+      801      } else {
+      802        BlockNode loopEnd = loop.getEnd();
+      803        stack.addExit(loop.getStart());
+      804 -      if (stack.containsExit(block)
+      805 -          || block == loopEnd
+      806 -          || loopEnd.getPredecessors().contains(block)) {
+      804 +      boolean isExit = stack.containsExit(block);
+      805 +      boolean isEnd = block == loopEnd;
+      806 +      boolean isPredEnd = loopEnd.getPredecessors().contain
+          +s(block);
+      807 +      LOG.warn("processSwitch-LOOP: block={} loopEnd={} isE
+          +xit={} isEnd={} isPredEnd={}", block, loopEnd, isExit, isEn
+          +d, isPredEnd);
+      808 +      if (isExit || isEnd || isPredEnd) {
+      809          // in exits or last insn in loop => no 'out' block
+      810          out = null;
+      811        } else {
+      812          out = calcSwitchOut(mth, block);
+      813 +        LOG.warn("processSwitch-LOOP: out={}", out);
+      814          if (out != null) {
+      815            if (isLoopStartBlock(out, loop) || out == mth.get
+           ExitBlock()
+      816                || !loop.getLoopBlocks().contains(out)) {
+
+⏺ Bash(./gradlew :jadx-core:test --tests
+      "jadx.tests.integration.switches.TestSwitchContinue" --no-daemon -i
+      2>&1 | grep "WARN")
+  ⎿      WARN  - processSwitch-LOOP: block=B:5:0x0006 loopEnd=B:16:0x000
+     2 isExit=false isEnd=false isPredEnd=false
+         WARN  - processSwitch-LOOP: out=B:16:0x0002
+  ⎿  (timeout 2m)
+
+⏺ Now I see: loopEnd=B:16:0x0002 and out=B:16:0x0002 — the ipdom is the loop
+  end block! The switch's merge point is between the switch and the loop end.
+   I need to reject the loop end as ipdom and let the fallback find the real
+  merge point.
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.j
+        ava)
+  ⎿  Added 1 line, removed 1 line
+      920        if (loop == null
+      921            || (loop.getLoopBlocks().contains(ipdom)
+      922                && !isLoopStartBlock(ipdom, loop)
+      923 -              && !block.isDominator(ipdom))) {
+      923 +              && ipdom != loop.getEnd())) {
+      924          return ipdom;
+      925        }
+      926      }
+
+⏺ Also need to filter loop end from the fallback candidates:
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.j
+        ava)
+  ⎿  Added 1 line
+      933      outs.clear(mth.getExitBlock().getId());
+      934      if (loop != null) {
+      935        outs.clear(loop.getStart().getId());
+      936 +      outs.clear(loop.getEnd().getId());
+      937        // clear blocks outside the loop (e.g. synthetic bloc
+           ks redirecting to loop header)
+      938        Set<BlockNode> loopBlocks = loop.getLoopBlocks();
+      939        List<BlockNode> allBlocks = mth.getBasicBlocks();
+
+⏺ Bash(./gradlew :jadx-core:test --tests
+      "jadx.tests.integration.switches.TestSwitchContinue" --no-daemon -i
+      2>&1 | grep -E "WARN|PASSED|FAILED|case |continue" | head…)
+  ⎿      WARN  - processSwitch-LOOP: block=B:5:0x0006 loopEnd=B:16:0x000
+     2 isExit=false isEnd=false isPredEnd=false
+         WARN  - processSwitch-LOOP: out=B:6:0x0009
+     … +6 lines (ctrl+o to expand)
+  ⎿  (timeout 2m)
+
+⏺ Bash(./gradlew :jadx-core:test --tests
+      "jadx.tests.integration.switches.TestSwitchContinue" --no-daemon -i
+      2>&1 | grep -A 40 "^    ---")
+  ⎿  No matches found
+  ⎿  (timeout 2m)
+
+⏺ Bash(./gradlew :jadx-core:test --tests
+      "jadx.tests.integration.switches.TestSwitchContinue" --no-daemon -i
+      2>&1 | grep -B2 -A50 "\-\-\-\-")
+  ⎿  No matches found
+  ⎿  (timeout 2m)
+
+⏺ Bash(./gradlew :jadx-core:test --tests
+      "jadx.tests.integration.switches.TestSwitchContinue" --no-daemon -i
+      2>&1 | grep -E "case|switch|continue|break|PASSED|FAILED|w…)
+  ⎿  (No output)
+  ⎿  (timeout 2m)
+
+⏺ Bash(./gradlew :jadx-core:test --tests
+      "jadx.tests.integration.switches.TestSwitchContinue" --no-daemon 2>&1 |
+       tail -15)
+  ⎿  > Task :jadx-plugins:jadx-dex-input:jar UP-TO-DATE
+     > Task :jadx-plugins:jadx-java-input:jar UP-TO-DATE
+     > Task :jadx-plugins:jadx-raung-input:jar UP-TO-DATE
+     … +12 lines (ctrl+o to expand)
+  ⎿  (timeout 2m)
+
+⏺ TestSwitchContinue passes! Now let's check TestSwitchBreak:
+
+⏺ Bash(./gradlew :jadx-core:test --tests
+      "jadx.tests.integration.switches.TestSwitchBreak" --no-daemon 2>&1 |
+      tail -10)
+  ⎿  * What went wrong:
+     Execution failed for task ':jadx-core:test'.
+     > There were failing tests. See the report at: file:///Users/yashve
+     … +8 lines (ctrl+o to expand)
+  ⎿  (timeout 2m)
+
+⏺ Bash(./gradlew :jadx-core:test --tests
+      "jadx.tests.integration.switches.TestSwitchBreak" --no-daemon -i 2>&1 |
+       grep -E "WARN|PASSED|FAILED|expected|but was" | head -…)
+  ⎿  > Task :jadx-core:test FAILED
+         WARN  - processSwitch-LOOP: block=B:5:0x0006 loopEnd=B:6:0x0009
+      isExit=false isEnd=false isPredEnd=false
+     … +5 lines (ctrl+o to expand)
+  ⎿  (timeout 2m)
+
+⏺ Bash(./gradlew :jadx-core:test --tests
+      "jadx.tests.integration.switches.TestSwitchBreak" --no-daemon -i 2>&1 |
+       grep -B2 -A 50 "public String test" | head -40)
+  ⎿      /* loaded from: /var/folders/wv/zplv7lv92m32p0l4fs0gj_qr0000gn/
+     T/jadx-17841422477059048765/classes.dex */
+         public class TestSwitchBreak$TestCls {
+     … +22 lines (ctrl+o to expand)
+  ⎿  (timeout 2m)
+
+⏺ The problem: B:6 (loop end) IS the merge block with actual code in
+  TestSwitchBreak. I shouldn't reject the loop end unconditionally. Let me
+  check what followEmptyPath does and understand why isLoopStartBlock fails
+  for B:16 in the first test.
+
+  Searched for 2 patterns, read 1 file (ctrl+o to expand)
+
+⏺ Now I understand. B:16 (TestSwitchContinue's loop end) is empty/synthetic —
+   it's just a back-edge goto. B:6 (TestSwitchBreak's loop end) has actual
+  instructions — it IS the merge point. I should only reject the loop end
+  when it's empty.
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.j
+        ava)
+  ⎿  Added 1 line, removed 1 line
+      920        if (loop == null
+      921            || (loop.getLoopBlocks().contains(ipdom)
+      922                && !isLoopStartBlock(ipdom, loop)
+      923 -              && ipdom != loop.getEnd())) {
+      923 +              && !(ipdom == loop.getEnd() && ipdom.getInstr
+          +uctions().isEmpty()))) {
+      924          return ipdom;
+      925        }
+      926      }
+
+⏺ Also update the fallback to not clear non-empty loop end blocks:
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.j
+        ava)
+  ⎿  Added 3 lines, removed 1 line
+      933      outs.clear(mth.getExitBlock().getId());
+      934      if (loop != null) {
+      935        outs.clear(loop.getStart().getId());
+      936 -      outs.clear(loop.getEnd().getId());
+      936 +      if (loop.getEnd().getInstructions().isEmpty()) {
+      937 +        outs.clear(loop.getEnd().getId());
+      938 +      }
+      939        // clear blocks outside the loop (e.g. synthetic bloc
+           ks redirecting to loop header)
+      940        Set<BlockNode> loopBlocks = loop.getLoopBlocks();
+      941        List<BlockNode> allBlocks = mth.getBasicBlocks();
+
+⏺ Bash(./gradlew :jadx-core:test --tests
+      "jadx.tests.integration.switches.TestSwitchContinue" --tests
+      "jadx.tests.integration.switches.TestSwitchBreak" --no-daemon 2>&…)
+  ⎿  * What went wrong:
+     Execution failed for task ':jadx-core:test'.
+     > There were failing tests. See the report at: file:///Users/yashve
+     … +8 lines (ctrl+o to expand)
+  ⎿  (timeout 2m)
+
+⏺ Bash(./gradlew :jadx-core:test --tests
+      "jadx.tests.integration.switches.TestSwitchContinue" --tests
+      "jadx.tests.integration.switches.TestSwitchBreak" --no-daemon 2>&…)
+  ⎿  > Task :jadx-core:test FAILED
+     TestSwitchBreak > test() FAILED
+     BUILD FAILED in 11s
+  ⎿  (timeout 2m)
+
+⏺ TestSwitchContinue passes now. Let me check TestSwitchBreak output:
+
+⏺ Bash(./gradlew :jadx-core:test --tests
+      "jadx.tests.integration.switches.TestSwitchBreak" --no-daemon -i 2>&1 |
+       grep -E "WARN|expected|but was" | head -10)
+  ⎿      WARN  - processSwitch-LOOP: block=B:5:0x0006 loopEnd=B:6:0x0009
+      isExit=false isEnd=false isPredEnd=false
+         WARN  - processSwitch-LOOP: out=B:6:0x0009
+  ⎿  (timeout 2m)
+
+⏺ Bash(./gradlew :jadx-core:test --tests
+      "jadx.tests.integration.switches.TestSwitchBreak" --no-daemon -i 2>&1 |
+       grep -B5 -A 50 "public String test")
+  ⎿      import org.hamcrest.MatcherAssert;
+         import org.hamcrest.Matchers;
+     … +45 lines (ctrl+o to expand)
+  ⎿  (timeout 2m)
+
+⏺ The issue is clear now: out=B:6 is the same block as loopEnd=B:6. When
+  insertContinueInSwitch is called with out == loopEnd, it incorrectly
+  inserts continue for all cases because their dom frontiers contain the loop
+   end. When out == loopEnd, no continue insertion is needed.
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.j
+        ava)
+  ⎿  Added 1 line, removed 1 line
+      824                  break;
+      825                }
+      826              }
+      827 -            if (needsContinue) {
+      827 +            if (needsContinue && out != loopEnd) {
+      828                insertContinueInSwitch(block, out, loopEnd);
+      829              }
+      830            }
+
+⏺ Bash(./gradlew :jadx-core:test --tests
+      "jadx.tests.integration.switches.TestSwitchContinue" --tests
+      "jadx.tests.integration.switches.TestSwitchBreak" --no-daemon 2>&…)
+  ⎿  BUILD SUCCESSFUL in 7s
+  ⎿  (timeout 2m)
+
+⏺ Both tests pass! Now let me remove the debug logging and run the full test
+  suite.
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.j
+        ava)
+  ⎿  Added 3 lines, removed 6 lines
+      801      } else {
+      802        BlockNode loopEnd = loop.getEnd();
+      803        stack.addExit(loop.getStart());
+      804 -      boolean isExit = stack.containsExit(block);
+      805 -      boolean isEnd = block == loopEnd;
+      806 -      boolean isPredEnd = loopEnd.getPredecessors().contain
+          -s(block);
+      807 -      LOG.warn("processSwitch-LOOP: block={} loopEnd={} isE
+          -xit={} isEnd={} isPredEnd={}", block, loopEnd, isExit, isEn
+          -d, isPredEnd);
+      808 -      if (isExit || isEnd || isPredEnd) {
+      804 +      if (stack.containsExit(block)
+      805 +          || block == loopEnd
+      806 +          || loopEnd.getPredecessors().contains(block)) {
+      807          // in exits or last insn in loop => no 'out' block
+      808          out = null;
+      809        } else {
+      810          out = calcSwitchOut(mth, block);
+      813 -        LOG.warn("processSwitch-LOOP: out={}", out);
+      811          if (out != null) {
+      812            if (isLoopStartBlock(out, loop) || out == mth.get
+           ExitBlock()
+      813                || !loop.getLoopBlocks().contains(out)) {
+
+⏺ Now run the full test suite:
+
+⏺ Bash(./gradlew :jadx-core:test --no-daemon 2>&1 | tail -20)
+  ⎿  > Task :jadx-plugins:jadx-dex-input:jar UP-TO-DATE
+     > Task :jadx-plugins:jadx-raung-input:jar UP-TO-DATE
+     > Task :jadx-plugins:jadx-java-input:jar UP-TO-DATE
+     … +16 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+⏺ All tests pass. Let me verify the final state of the changed files:
+
+⏺ Bash(git diff --stat)
+  ⎿   .../main/java/jadx/core/dex/nodes/BlockNode.java   |  30 +++++
+      .../core/dex/visitors/blocks/BlockProcessor.java   |   1 +
+      .../core/dex/visitors/blocks/DominatorTree.java    | 144 +++++++++
+     … +6 lines (ctrl+o to expand)
+
+⏺ All tests pass. Here's a summary of the fixes:
+
+  RegionMaker.java — switch-in-loop out block detection:
+  1. calcSwitchOut: When inside a loop, reject the ipdom if it's the empty
+  loop end block (synthetic back-edge goto) or outside the loop blocks. Also
+  filter loop end/outside-loop blocks from the fallback dom-frontier
+  candidates.
+  2. processSwitch: Use isLoopStartBlock() and loop block containment checks
+  instead of just reference equality for the loop start. Skip
+  insertContinueInSwitch when out == loopEnd (the merge point IS the loop
+  end, so no continue insertion needed).
+  3. Removed 3 LOG.warn debug statements left from a previous debugging pass.
+
+  DominatorTree.java — dead code cleanup:
+  4. Removed unused idMap array in sortBlocksReverse that was built but never
+   used.
+
+✽ Contemplating… (19m 13s · ↓ 28.0k tokens)
+  ⎿  Tip: Use /btw to ask a quick side question without interrupting Claude's
+      current work
+yashverma@yashs-MacBook-Pro B %
+
+

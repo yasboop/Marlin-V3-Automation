@@ -1,0 +1,476 @@
+ ▐▛███▜▌   Claude Code v2.1.85
+▝▜█████▛▘  Opus 4.6 · API Usage Billing
+  ▘▘ ▝▝    ~/.cache/claude-hfi/-Users-yashverma-Downloads-jadx-2054/A
+
+  Debug mode enabled
+  Logging to: /var/folders/wv/zplv7lv92m32p0l4fs0gj_qr0000gn/T/claude-hfi/54ba2019-7715-46a
+  c-b630-5674af9fcf44/debug.txt
+
+❯ /clear
+  ⎿  (no content)
+
+❯ TestSwitchContinue and TestSwitchBreak were the last two failing tests before the
+session ended and havent been verified since. Run the switch tests first - if they
+still fail ,the problem is in how calcSwitchOut and processSwitch handle switches
+inside loops ,the continue insertion path isnt correctly finding the out block when the
+ cached ipdom points back towards the loop header.
+
+Also three LOG.warn debug statements are sitting in RegionMaker that were left from a
+debugging pass ,and sortBlocksReverse in DominatorTree has an idMap array thats built
+but never actually used. Those should go ,and the whole test suite should pass without
+issues
+
+❯ TestSwitchContinue and TestSwitchBreak were the last two failing tests before the
+session ended and havent been verified since. Run the switch tests first - if they
+still fail ,the problem is in how calcSwitchOut and processSwitch handle switches
+inside loops ,the continue insertion path isnt correctly finding the out block when the
+ cached ipdom points back towards the loop header.
+
+Also three LOG.warn debug statements are sitting in RegionMaker that were left from a
+debugging pass ,and sortBlocksReverse in DominatorTree has an idMap array thats built
+but never actually used. Those should go ,and the whole test suite should pass without
+issues
+
+⏺ Bash(./gradlew test --tests "*TestSwitchContinue*" --tests "*TestSwitchBreak*" 2>&1 |
+      tail -80)
+  ⎿  Note: Recompile with -Xlint:deprecation for details.
+
+     > Task :jadx-core:test
+     … +51 lines (ctrl+o to expand)
+
+  Read 2 files (ctrl+o to expand)
+
+⏺ Bash(git -C /Users/yashverma/.cache/claude-hfi/-Users-yashverma-Downloads-jadx-2054/A
+      diff jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.java)
+  ⎿  diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.j
+     ava b/jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.java
+     index e83188c..c15ba67 100644
+     … +71 lines (ctrl+o to expand)
+
+  Read 2 files (ctrl+o to expand)
+
+⏺ Bash(git -C /Users/yashverma/.cache/claude-hfi/-Users-yashverma-Downloads-jadx-2054/A
+      diff jadx-core/src/main/java/jadx/core/utils/BlockUtils.java)
+  ⎿  diff --git a/jadx-core/src/main/java/jadx/core/utils/BlockUtils.java b/jadx-core/
+     src/main/java/jadx/core/utils/BlockUtils.java
+     index ec70005..9ad0654 100644
+     … +60 lines (ctrl+o to expand)
+
+⏺ Bash(git -C /Users/yashverma/.cache/claude-hfi/-Users-yashverma-Downloads-jadx-2054/A
+      diff jadx-core/src/main/java/jadx/core/dex/nodes/BlockNode.java jadx-core/src/m…)
+  ⎿  diff --git a/jadx-core/src/main/java/jadx/core/dex/nodes/BlockNode.java b/jadx-co
+     re/src/main/java/jadx/core/dex/nodes/BlockNode.java
+     index 6814de2..7b404f6 100644
+     … +33 lines (ctrl+o to expand)
+
+⏺ Bash(./gradlew :jadx-core:test --tests
+      "jadx.tests.integration.switches.TestSwitchContinue" --tests
+      "jadx.tests.integration.switches.TestSwitchBreak" -i 2>&1 | grep…)
+  ⎿  TestSwitchContinue > test() STANDARD_OUT
+     TestSwitchBreak > test() STANDARD_OUT
+     TestSwitchContinue > test() STANDARD_OUT
+     … +77 lines (ctrl+o to expand)
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Bash(./gradlew :jadx-core:test --tests
+      "jadx.tests.integration.switches.TestSwitchContinue" --tests
+      "jadx.tests.integration.switches.TestSwitchBreak" -i 2>&1 | grep…)
+  ⎿      package jadx.tests.integration.switches;
+
+         /* loaded from: /var/folders/wv/zplv7lv92m32p0l4fs0gj_qr0000gn/T/jadx-3368487
+     … +46 lines (ctrl+o to expand)
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.java)
+  ⎿  Added 5 lines, removed 1 line
+      808          out = null;
+      809        } else {
+      810          out = calcSwitchOut(mth, block);
+      811 -        LOG.warn("SWITCH-LOOP: block={} out={} loopStart={}", block, out,
+          - loop.getStart());
+      811 +        LOG.warn("SWITCH-LOOP: block={} out={} loopStart={} loopEnd={} lo
+          +opEndPreds={} switchSuccs={}",
+      812 +            block, out, loop.getStart(), loopEnd, loopEnd.getPredecessors
+          +(), block.getCleanSuccessors());
+      813 +        for (BlockNode s : block.getCleanSuccessors()) {
+      814 +          LOG.warn("  succ={} DF={} ipdom={} succs={}", s, BlockUtils.bit
+          +SetToBlocks(mth, s.getDomFrontier()), s.getIPostDom(), s.getCleanSuccesso
+          +rs());
+      815 +        }
+      816          if (out != null) {
+      817            if (out == loop.getStart() || out == mth.getExitBlock()) {
+      818              out = null;
+
+⏺ Bash(./gradlew :jadx-core:test --tests
+      "jadx.tests.integration.switches.TestSwitchContinue" --tests
+      "jadx.tests.integration.switches.TestSwitchBreak" -i 2>&1 | grep…)
+  ⎿      WARN  - SWITCH-LOOP: block=B:5:0x0006 out=B:16:0x0002 loopStart=B:3:0x0002 lo
+     opEnd=B:16:0x0002 loopEndPreds=ImmutableList{[B:17:0x0002, B:18:0x0002]} switchSu
+     ccs=ImmutableList{[B:12:0x0047, B:13:0x0009, B:14:0x001f, B:15:0x0033]}
+     … +15 lines (ctrl+o to expand)
+
+⏺ Now I understand both failures. For TestSwitchContinue, the ipdom is loopEnd (B:16)
+  but isLoopStartBlock doesn't detect it. For TestSwitchBreak, out == loopEnd (B:6), so
+  insertContinueInSwitch wrongly adds continues to every case that reaches out.
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.java)
+  ⎿  Added 7 lines, removed 22 lines
+      797      BlockNode out;
+      798      LoopInfo loop = mth.getLoopForBlock(block);
+      799      if (loop == null) {
+      800 -      out = calcSwitchOut(mth, block);
+      800 +      out = calcSwitchOut(mth, block, null);
+      801      } else {
+      802        BlockNode loopEnd = loop.getEnd();
+      803        stack.addExit(loop.getStart());
+     ...
+      807          // in exits or last insn in loop => no 'out' block
+      808          out = null;
+      809        } else {
+      810 -        out = calcSwitchOut(mth, block);
+      811 -        LOG.warn("SWITCH-LOOP: block={} out={} loopStart={} loopEnd={} lo
+          -opEndPreds={} switchSuccs={}",
+      812 -            block, out, loop.getStart(), loopEnd, loopEnd.getPredecessors
+          -(), block.getCleanSuccessors());
+      813 -        for (BlockNode s : block.getCleanSuccessors()) {
+      814 -          LOG.warn("  succ={} DF={} ipdom={} succs={}", s, BlockUtils.bit
+          -SetToBlocks(mth, s.getDomFrontier()), s.getIPostDom(), s.getCleanSuccesso
+          -rs());
+      810 +        out = calcSwitchOut(mth, block, loop);
+      811 +        if (out != null && out != loopEnd) {
+      812 +          // 'continue' needed for cases that bypass 'out' and go straigh
+          +t to loop end
+      813 +          insertContinueInSwitch(block, out, loopEnd);
+      814          }
+      816 -        if (out != null) {
+      817 -          if (out == loop.getStart() || out == mth.getExitBlock()) {
+      818 -            out = null;
+      819 -          } else {
+      820 -            // insert 'continue' only when some case bypasses the out blo
+          -ck
+      821 -            boolean needsContinue = false;
+      822 -            for (BlockNode s : block.getCleanSuccessors()) {
+      823 -              if (!isPathExists(s, out)) {
+      824 -                needsContinue = true;
+      825 -                break;
+      826 -              }
+      827 -            }
+      828 -            if (needsContinue) {
+      829 -              insertContinueInSwitch(block, out, loopEnd);
+      830 -            }
+      831 -          }
+      815 +        if (out == loop.getStart()) {
+      816 +          out = null;
+      817          }
+      818        }
+      819      }
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.java)
+  ⎿  Added 16 lines, removed 29 lines
+      898    }
+      899
+      900    @Nullable
+      901 -  private static BlockNode calcSwitchOut(MethodNode mth, BlockNode block)
+          - {
+      902 -    LoopInfo loop = mth.getLoopForBlock(block);
+      901 +  private static BlockNode calcSwitchOut(MethodNode mth, BlockNode block,
+          + @Nullable LoopInfo loop) {
+      902      // use cached immediate post-dominator
+      903      BlockNode ipdom = block.getIPostDom();
+      904      if (ipdom != null && ipdom != mth.getExitBlock()) {
+      906 -      if (loop == null || !isLoopStartBlock(ipdom, loop)) {
+      905 +      if (loop == null) {
+      906          return ipdom;
+      907        }
+      908 +      if (ipdom != loop.getStart() && ipdom != loop.getEnd()) {
+      909 +        return ipdom;
+      910 +      }
+      911      }
+      910 -    // fallback: dom frontier union filtered by dominance
+      911 -    LOG.warn("calcSwitchOut FALLBACK: block={} ipdom={} loopStart={}", bl
+          -ock, ipdom, loop != null ? loop.getStart() : "no-loop");
+      912 +    // fallback: at least one case exits the loop/method directly,
+      913 +    // so the global ipdom points past the real convergence point.
+      914 +    // Use dominance frontier union of the case blocks to find it.
+      915      BitSet outs = BlockUtils.copyBlocksBitSet(mth, block.getDomFrontier()
+           );
+      916      for (BlockNode s : block.getCleanSuccessors()) {
+      917        outs.or(s.getDomFrontier());
+     ...
+      921      if (loop != null) {
+      922        outs.clear(loop.getStart().getId());
+      923      }
+      921 -    LOG.warn("calcSwitchOut FALLBACK: outs={} card={}", outs, outs.cardin
+          -ality());
+      922 -    if (outs.cardinality() == 1) {
+      923 -      return BlockUtils.bitSetToOneBlock(mth, outs);
+      924 -    }
+      924      if (outs.cardinality() > 1) {
+      926 -      // filter to blocks dominated by the switch block
+      925 +      // prefer the earliest convergence point: drop any candidate that
+      926 +      // post-dominates another candidate
+      927        List<BlockNode> blocks = mth.getBasicBlocks();
+      928 +      BitSet laterBlocks = BlockUtils.newBlocksBitSet(mth);
+      929        for (int i = outs.nextSetBit(0); i >= 0; i = outs.nextSetBit(i + 1)
+           ) {
+      929 -        if (!blocks.get(i).isDominator(block)) {
+      930 -          outs.clear(i);
+      930 +        BitSet pdoms = blocks.get(i).getPostDoms();
+      931 +        if (pdoms != null) {
+      932 +          laterBlocks.or(pdoms);
+      933          }
+      934        }
+      933 -      if (outs.cardinality() == 1) {
+      934 -        return BlockUtils.bitSetToOneBlock(mth, outs);
+      935 -      }
+      936 -      // pick the one closest to the switch (lowest block id = earliest i
+          -n DFS)
+      937 -      if (!outs.isEmpty()) {
+      938 -        return blocks.get(outs.nextSetBit(0));
+      939 -      }
+      935 +      outs.andNot(laterBlocks);
+      936      }
+      941 -    return null;
+      937 +    return BlockUtils.bitSetToOneBlock(mth, outs);
+      938    }
+      939
+      944 -  private static boolean isLoopStartBlock(BlockNode block, LoopInfo loop)
+          - {
+      945 -    if (block == loop.getStart()) {
+      946 -      return true;
+      947 -    }
+      948 -    // check for synthetic blocks that redirect to loop start
+      949 -    BlockNode next = BlockUtils.followEmptyPath(block);
+      950 -    return next == loop.getStart();
+      951 -  }
+      952 -
+      940    /**
+      941     * Remove empty case blocks:
+      942     * 1. single 'default' case
+
+⏺ Now clean up the unused idMap in DominatorTree:
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/blocks/DominatorTree.java)
+  ⎿  Added 1 line, removed 6 lines
+      145      // Some blocks may not be reachable from exit in reverse (e.g., infin
+           ite loops).
+      146      // Add any missing blocks at the end.
+      147      if (sorted.size() != blocksCount) {
+      148 -      java.util.BitSet visited = new java.util.BitSet(blocksCount);
+      148 +      BitSet visited = new BitSet(blocksCount);
+      149        for (BlockNode b : sorted) {
+      150          visited.set(b.getId());
+      151        }
+     ...
+      155          }
+      156        }
+      157      }
+      158 -    // Build id mapping: position in sorted list
+      159 -    int[] idMap = new int[blocksCount];
+      160 -    for (int i = 0; i < sorted.size(); i++) {
+      161 -      idMap[sorted.get(i).getId()] = i;
+      162 -    }
+      158      return sorted;
+      159    }
+      160
+
+⏺ Bash(./gradlew :jadx-core:test --tests "jadx.tests.integration.switches.*" 2>&1 | tail
+       -60)
+  ⎿  > Task :buildSrc:checkKotlinGradlePluginConfigurationErrors
+     > Task :buildSrc:generateExternalPluginSpecBuilders UP-TO-DATE
+     > Task :buildSrc:extractPrecompiledScriptPluginPlugins UP-TO-DATE
+     … +29 lines (ctrl+o to expand)
+
+⏺ All switch tests pass. Let me verify no stray debug logs remain and run the full
+  suite.
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+⏺ Bash(./gradlew :jadx-core:test 2>&1 | tail -40)
+  ⎿  > Task :jadx-core:processResources UP-TO-DATE
+     > Task :jadx-plugins:jadx-java-convert:processResources UP-TO-DATE
+     > Task :jadx-plugins:jadx-smali-input:processResources UP-TO-DATE
+     … +26 lines (ctrl+o to expand)
+
+⏺ Full suite passes. Let me check if the LOG field is now unused and run the rest of the
+   project tests.
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+⏺ Bash(git -C /Users/yashverma/.cache/claude-hfi/-Users-yashverma-Downloads-jadx-2054/A
+      show HEAD:jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.ja…)
+  ⎿  63:        private static final Logger LOG =
+     LoggerFactory.getLogger(RegionMaker.class);
+
+
+⏺ The LOG field was already unused in the original — leaving it. Now run the full
+  project test suite.
+
+⏺ Bash(./gradlew test 2>&1 | tail -30)
+  ⎿          at java.base@17.0.18/java.util.stream.AbstractPipeline.copyInto(AbstractP
+     ipeline.java:509)
+             at java.base@17.0.18/java.util.stream.AbstractPipeline.wrapAndCopyInto(Ab
+     … +21 lines (ctrl+o to expand)
+
+⏺ Bash(git -C /Users/yashverma/.cache/claude-hfi/-Users-yashverma-Downloads-jadx-2054/A
+      stash && ./gradlew :jadx-plugins:jadx-java-input:test 2>&1 | tail -15 && git -C…)
+  ⎿  Saved working directory and index state WIP on hfi/54ba2019-7715-46ac-b630-5674af
+     9fcf44/A: faa9178 Initial commit
+                 ... 8 more
+     … +22 lines (ctrl+o to expand)
+
+⏺ That jadx-java-input failure is pre-existing (missing test resources), unrelated to
+  these changes. Let me confirm all other test tasks pass.
+
+⏺ Bash(./gradlew test -x :jadx-plugins:jadx-java-input:test 2>&1 | tail -15)
+  ⎿  > Task :jadx-gui:compileKotlin
+     > Task :jadx-plugins:jadx-script:jadx-script-plugin:test
+     > Task :jadx-plugins:jadx-script:jadx-script-ide:test
+     … +14 lines (ctrl+o to expand)
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+⏺ Bash(./gradlew :jadx-cli:test 2>&1 | grep -E "FAILED|PASSED|Error|Exception" | head
+      -20)
+  ⎿  > Task :buildSrc:checkKotlinGradlePluginConfigurationErrors
+     > Task :jadx-plugins:jadx-kotlin-metadata:checkKotlinGradlePluginConfigurationErr
+     ors
+     … +9 lines (ctrl+o to expand)
+
+⏺ Bash(git -C /Users/yashverma/.cache/claude-hfi/-Users-yashverma-Downloads-jadx-2054/A
+      stash && ./gradlew :jadx-cli:test 2>&1 | grep -E "FAILED|tests completed" | hea…)
+  ⎿  Saved working directory and index state WIP on hfi/54ba2019-7715-46ac-b630-5674af
+     9fcf44/A: faa9178 Initial commit
+     TestInput > testClassInput() FAILED
+     … +22 lines (ctrl+o to expand)
+
+⏺ Both remaining failures (jadx-cli:TestInput.testClassInput and
+  jadx-java-input:CustomLoadTest) are pre-existing on the clean tree —
+  environment/resource issues unrelated to these changes.
+
+  Summary of fixes:
+
+  - RegionMaker.calcSwitchOut
+  (jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.java:897): Now
+  rejects the cached ipdom when it points to loop.getEnd() (not just loop.getStart()).
+  The fallback DF-union now uses a post-dominance filter — it drops any candidate that
+  post-dominates another candidate, keeping the earliest convergence point inside the
+  loop instead of the loop end.
+  - RegionMaker.processSwitch loop branch (RegionMaker.java:810): insertContinueInSwitch
+   is only called when out != loopEnd. When out == loopEnd (TestSwitchBreak), every case
+   naturally reaches it and no continue should be inserted.
+  - Removed the three LOG.warn debug statements and the unused isLoopStartBlock helper.
+  - DominatorTree.sortBlocksReverse (DominatorTree.java:139): removed the dead idMap
+  array and switched the inline java.util.BitSet to the already-imported BitSet.
+
+  jadx-core:test — all 1400+ tests pass, including TestSwitchContinue and
+  TestSwitchBreak.
+
+❯ processSwitch is calling insertContinueInSwitch whenever out != loopEnd right now
+,but if every case branch already reaches out naturally the continue ends up being
+unnecessary and can produce wrong output. It should only fire when at least one case is
+ bypassing out and going straight to loopEnd instead. calcSwitchOut also needs a loop
+containment check on the ipdom ,right now its only rejecting loop start and loop end
+but a block outside the loop thats not either of those would slip through. Run switch
+tests and the whole jadx core suite after
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Now let me look at the insertContinueInSwitch logic to understand the DF check and
+  also check loop containment via LoopInfo:
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Now let me check how LoopInfo tracks containment:
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+⏺ Good. loop.getLoopBlocks().contains(ipdom) is the containment check. Now I have both
+  fixes clear:
+
+  1. calcSwitchOut loop containment: replace the ipdom != loop.getStart() && ipdom !=
+  loop.getEnd() check with loop.getLoopBlocks().contains(ipdom).
+  2. processSwitch continue guard: only call insertContinueInSwitch when at least one
+  case successor has loopEnd in its dominance frontier (meaning it bypasses out and goes
+   straight to loopEnd).
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.java)
+  ⎿  Added 13 lines, removed 2 lines
+      809        } else {
+      810          out = calcSwitchOut(mth, block, loop);
+      811          if (out != null && out != loopEnd) {
+      812 -          // 'continue' needed for cases that bypass 'out' and go straigh
+          -t to loop end
+      813 -          insertContinueInSwitch(block, out, loopEnd);
+      812 +          // insert 'continue' only when at least one case bypasses 'out'
+      813 +          // and goes straight to the loop end block
+      814 +          int loopEndId = loopEnd.getId();
+      815 +          boolean hasDirectLoopEnd = false;
+      816 +          for (BlockNode s : block.getCleanSuccessors()) {
+      817 +            if (s.getDomFrontier().get(loopEndId) && s != out) {
+      818 +              hasDirectLoopEnd = true;
+      819 +              break;
+      820 +            }
+      821 +          }
+      822 +          if (hasDirectLoopEnd) {
+      823 +            insertContinueInSwitch(block, out, loopEnd);
+      824 +          }
+      825          }
+      826          if (out == loop.getStart()) {
+      827            out = null;
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.java)
+  ⎿  Added 3 lines, removed 1 line
+      916        if (loop == null) {
+      917          return ipdom;
+      918        }
+      919 -      if (ipdom != loop.getStart() && ipdom != loop.getEnd()) {
+      919 +      // only accept ipdom if it's actually inside the loop body
+      920 +      if (loop.getLoopBlocks().contains(ipdom)
+      921 +          && ipdom != loop.getStart() && ipdom != loop.getEnd()) {
+      922          return ipdom;
+      923        }
+      924      }
+
+⏺ Bash(./gradlew :jadx-core:test --tests "jadx.tests.integration.switches.*" 2>&1 | tail
+      -10)
+  ⎿  > Task :jadx-plugins:jadx-java-convert:compileJava FROM-CACHE
+     > Task :jadx-plugins:jadx-java-convert:classes UP-TO-DATE
+     > Task :jadx-plugins:jadx-java-convert:jar UP-TO-DATE
+     … +7 lines (ctrl+o to expand)
+  ⎿  (timeout 5m)
+
+⏺ Switch tests pass. Now the full suite:
+
+⏺ Bash(./gradlew :jadx-core:test 2>&1 | tail -10)
+  ⎿  Running in the background (↓ to manage)
+  ⎿  (timeout 10m)
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Bash(./gradlew :jadx-core:test 2>&1 | tail -10)
+  ⎿  > Task :jadx-core:testClasses UP-TO-DATE
+     OpenJDK 64-Bit Server VM warning: Sharing is only supported for boot loader class
+     es because bootstrap classpath has been appended
+     … +11 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+⏺ All 1400+ jadx-core tests pass.
+
+  Two changes made:
+
+  1. calcSwitchOut (line 908): Added loop.getLoopBlocks().contains(ipdom) — the ipdom must
+  actually be inside the loop, not just different from start/end. A block outside the loop
+  that happens to not be start or end would have slipped through before.
+  2. processSwitch (lines 812-823): insertContinueInSwitch now only fires when at least one
+   case successor has loopEnd in its dominance frontier (and isn't out itself). This
+  mirrors the same s.getDomFrontier().get(endId) && s != out check that
+  insertContinueInSwitch uses internally — if no successor matches that condition, the call
+   would do nothing anyway, but more importantly it avoids calling it in cases where it
+  shouldn't apply at all.
+
+✳ Crystallizing… (21m 58s · ↓ 1.5k tokens)
+  ⎿  Tip: Use /btw to ask a quick side question without interrupting Claude's current work
+yashverma@yashs-MacBook-Pro A %

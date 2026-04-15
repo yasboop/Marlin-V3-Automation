@@ -293,7 +293,7 @@ bash automation/hfi_orchestrator.sh full <tarball> <prompt>         # All-in-one
 - **Turns missing from Snorkel** -- usually a submission upload timeout. Run `bash automation/hfi_orchestrator.sh diagnose` or see `docs/TROUBLESHOOTING.md`
 - **"Raw mode not supported"** -- HFI wasnt launched inside tmux. The automation handles this, but if manual: `tmux new-session -d -s hfi './claude-hfi --tmux'`
 - **Context limit reached** -- one trajectory used all its context. Note it in feedback as a weakness. The other trajectory is usually fine
-- **Trajectory stuck** -- check its tmux session (`tmux attach -t <session-id>-A`). It might be waiting for you to type `y` to approve a tool action
+- **Trajectory stuck** -- check its tmux window (`tmux select-window -t <session-id>:1` for A, `:2` for B). It might be waiting for you to type `y` to approve a tool action
 - **CLAUDE_ENV_FILE for Python** -- if trajectories cant find packages, you forgot to set the environment file (see section above)
 
 ---

@@ -1,0 +1,470 @@
+=== TRAJECTORY B -- Turn 1 ===
+=== Changed files ===
+A	CLAUDE.md
+M	third_party/xla/xla/service/memory_space_assignment/algorithm.cc
+M	third_party/xla/xla/service/memory_space_assignment/algorithm.h
+M	third_party/xla/xla/service/memory_space_assignment/allocation.cc
+M	third_party/xla/xla/service/memory_space_assignment/allocation.h
+M	third_party/xla/xla/service/memory_space_assignment/memory_space_assignment.cc
+M	third_party/xla/xla/service/memory_space_assignment/memory_space_assignment_test.cc
+M	third_party/xla/xla/service/memory_space_assignment/options.h
+
+=== Full diff ===
+diff --git a/CLAUDE.md b/CLAUDE.md
+new file mode 100644
+index 00000000..c26eab7c
+--- /dev/null
++++ b/CLAUDE.md
+@@ -0,0 +1,46 @@
++# TensorFlow / XLA Memory Space Assignment
++
++## Overview
++
++This is the TensorFlow repository. The area of focus is XLA's Memory Space Assignment (MSA) module located at `third_party/xla/xla/service/memory_space_assignment/`.
++
++MSA is a compiler pass that decides whether HLO buffers should live in default memory (HBM) or faster alternate memory (VMEM/SRAM). It handles prefetching buffers from default to alternate memory, evicting them back, and scheduling these async copies to overlap with computation.
++
++## Key Source Files
++
++- `algorithm.cc` / `algorithm.h` — Core MSA algorithm (`MsaAlgorithm` class). Contains `AllocateAllocationValues`, `AllocateSegment`, `CreateAllocationRequest`, and all the logic for deciding memory placement.
++- `allocation.cc` / `allocation.h` — Allocation type hierarchy. Base class `Allocation` with subclasses: `PinnedAllocation`, `CopyAllocation`, `SlicedCopyAllocation`, `MirroredAllocation`, `ParentAllocation`, `WindowPrefetchedAllocation`, `ScopedAllocation`, `ReservedAllocation`.
++- `memory_space_assignment.cc` / `memory_space_assignment.h` — Top-level pass that runs the algorithm, processes allocations, and verifies results.
++- `allocation_value.cc` / `allocation_value.h` — `AllocationValue` represents an HLO value that needs memory assignment, with its uses and defining position.
++- `options.h` — Configuration options for the algorithm.
++
++## Build System
++
++TensorFlow uses Bazel. BUILD files define targets and dependencies.
++
++```bash
++# Build MSA library
++bazel build //third_party/xla/xla/service/memory_space_assignment:memory_space_assignment
++
++# Run MSA tests
++bazel test //third_party/xla/xla/service/memory_space_assignment:memory_space_assignment_test
++```
++
++## Code Conventions
++
++- C++17 with Google style
++- Uses `absl::Status` / `absl::StatusOr` for error handling
++- HLO instructions use opcodes like `HloOpcode::kConditional`, `HloOpcode::kWhile`
++- Memory spaces: `MemorySpace::kDefault` (HBM) and `MemorySpace::kAlternate` (VMEM)
++- Allocations track start/end times in the HLO schedule
++- `VLOG(N)` for debug logging at various verbosity levels
++- Tests use `ParseAndReturnVerifiedModule` to create HLO modules from string, then `AssignMemorySpace` to run MSA
++
++## Architecture Notes
++
++- The algorithm processes allocation values in priority order (determined by `MsaBufferIntervalCompare`)
++- For each value, it iterates through uses and calls `AllocateSegment` to find placement
++- `MirroredAllocation` currently only handles while-loop eviction scenarios in default memory
++- Conditional operations have special handling: operands passed into conditionals may need eviction if the branches modify memory
++- `AliasedOffset` tracks which allocations share the same physical memory chunk
++- `CreateOrAddToAliasedOffset` manages the offset map and asserts no duplicates
+diff --git a/third_party/xla/xla/service/memory_space_assignment/algorithm.cc b/third_party/xla/xla/service/memory_space_assignment/algorithm.cc
+index 5eeaacd6..110675ba 100644
+--- a/third_party/xla/xla/service/memory_space_assignment/algorithm.cc
++++ b/third_party/xla/xla/service/memory_space_assignment/algorithm.cc
+@@ -4226,6 +4226,8 @@ absl::StatusOr<AllocationResult> MsaAlgorithm::AllocateAllocationValues(
+       MaybeCreateMirroredParentAllocationForWhileUse(
+           allocation_value_to_update, use, use_time, allocation_values,
+           preferred_offset_for_computation);
++      MaybeCreateMirroredAllocationForConditionalUse(
++          allocation_value_to_update, use, use_time, allocation_values);
+     }
+   }
+ 
+@@ -4397,9 +4399,15 @@ AllocationRequest MsaAlgorithm::CreateAllocationRequest(
+     // alternate memory allocation, subsequent uses cannot use the same
+     // alternate memory allocation in order not to clobber data. So we force
+     // default memory allocation for these subsequent uses.
++    //
++    // However, if mirrored allocations were created for the conditional's
++    // branch parameters (meaning the buffer stays pinned in alternate memory
++    // throughout the conditional), we skip the eviction.
+     if (previous_use->hlo_use.instruction->opcode() ==
+             HloOpcode::kConditional &&
+-        previous_use->hlo_use.instruction != hlo_use.instruction) {
++        previous_use->hlo_use.instruction != hlo_use.instruction &&
++        !conditionals_with_mirrored_alternate_mem_.contains(
++            previous_use->hlo_use.instruction)) {
+       allow_no_copy_alternate_mem_allocation = false;
+       earliest_prefetch_time =
+           instruction_schedule.at(previous_use->hlo_use.instruction);
+@@ -4651,6 +4659,109 @@ void MsaAlgorithm::MaybeCreateMirroredParentAllocationForWhileUse(
+       GetAliasedOffset(*aliased_allocation);
+ }
+ 
++bool MsaAlgorithm::MaybeCreateMirroredAllocationForConditionalUse(
++    const AllocationValue& allocation_value, const AllocationValue::Use& use,
++    int64_t use_time, absl::Span<AllocationValue> allocation_values) {
++  const HloUse& hlo_use = use.hlo_use;
++  if (hlo_use.instruction->opcode() != HloOpcode::kConditional) {
++    return false;
++  }
++  if (!options_.enable_conditional_redundant_eviction_elimination) {
++    return false;
++  }
++
++  Allocation* aliased_allocation =
++      GetLiveAllocationAt(*allocation_value.allocation_sequence(), use_time);
++  if (!aliased_allocation ||
++      aliased_allocation->memory_space() != MemorySpace::kAlternate) {
++    return false;
++  }
++
++  const auto& instruction_schedule = hlo_live_range_.instruction_schedule();
++
++  // Check that all uses in all branches can work with alternate memory.
++  for (const AllocationValue::Use& other_use : allocation_value.uses()) {
++    if (other_use.hlo_use.instruction != hlo_use.instruction) {
++      continue;
++    }
++    // Operand 0 of conditional is the predicate, not passed to computations.
++    if (other_use.hlo_use.operand_number == 0) {
++      continue;
++    }
++    HloComputation* called_computation =
++        hlo_use.instruction->called_computations().at(
++            other_use.hlo_use.operand_number - 1);
++    const HloInstruction* parameter_instruction =
++        called_computation->parameter_instruction(0);
++    HloValue* parameter_value =
++        &alias_analysis_.dataflow_analysis().GetUniqueValueAt(
++            parameter_instruction, other_use.hlo_use.operand_index);
++    int64_t parameter_time = instruction_schedule.at(parameter_instruction);
++    int64_t conditional_time = instruction_schedule.at(hlo_use.instruction);
++    int64_t min_use_time = conditional_time;
++    for (const HloUse& parameter_use : parameter_value->GetUses()) {
++      if (parameter_use.instruction->parent() == called_computation &&
++          parameter_use.instruction->opcode() !=
++              HloOpcode::kGetTupleElement &&
++          parameter_use.instruction->opcode() != HloOpcode::kTuple &&
++          parameter_use.instruction->opcode() != HloOpcode::kBitcast) {
++        min_use_time = std::min(
++            min_use_time, instruction_schedule.at(parameter_use.instruction));
++      }
++    }
++    // Check if we can keep the buffer in alternate memory for this branch.
++    if (!options_.prefetch_interval_picker->CanAllocateInAlternateMemoryNoCopy(
++            parameter_value->shape(), parameter_time, min_use_time)) {
++      VLOG(4) << "Conditional mirrored allocation not possible for "
++              << called_computation->name()
++              << ": parameter use too far from parameter definition.";
++      return false;
++    }
++    // Also check if any use in this branch requires default memory.
++    if (!options_.is_use_allowed_in_alternate_mem_fn(other_use.hlo_use)) {
++      VLOG(4) << "Conditional mirrored allocation not possible: use "
++              << other_use.hlo_use.ToString()
++              << " not allowed in alternate memory.";
++      return false;
++    }
++  }
++
++  // All branches can use alternate memory. Create mirrored allocations for
++  // branch parameters.
++  VLOG(3) << "Creating mirrored allocations in alternate memory for "
++             "conditional operand: "
++          << aliased_allocation->ToString();
++  conditionals_with_mirrored_alternate_mem_.insert(hlo_use.instruction);
++  for (AllocationValue& av : allocation_values) {
++    if (av.defining_instruction()->opcode() != HloOpcode::kParameter) {
++      continue;
++    }
++    HloComputation* computation = av.computation();
++    bool is_branch_of_this_conditional = false;
++    for (const HloComputation* called :
++         hlo_use.instruction->called_computations()) {
++      if (called == computation) {
++        is_branch_of_this_conditional = true;
++        break;
++      }
++    }
++    if (!is_branch_of_this_conditional) {
++      continue;
++    }
++    int64_t parameter_time =
++        instruction_schedule.at(av.defining_instruction());
++    av.mutable_allocation_sequence()->push_back(
++        std::make_unique<MirroredAllocation>(
++            *aliased_allocation, parameter_time, MemorySpace::kAlternate));
++    VLOG(3) << "Created mirrored allocation for branch parameter in "
++            << computation->name() << ": "
++            << av.allocation_sequence()->back()->ToString();
++    CreateOrAddToAliasedOffset(*av.allocation_sequence()->back(),
++                               GetAliasedOffset(*aliased_allocation));
++  }
++  return true;
++}
++
+ bool operator<(const AsynchronousCopy& a, const AsynchronousCopy& b) {
+   return a.AsTuple() < b.AsTuple();
+ }
+@@ -6038,6 +6149,7 @@ void MsaAlgorithm::ClearPendingChunks() {
+   pending_required_assignments_.clear();
+   aliased_offset_map_.clear();
+   aliased_offsets_.clear();
++  conditionals_with_mirrored_alternate_mem_.clear();
+ }
+ 
+ bool MsaAlgorithm::IsInstructionPendingReplacements(
+diff --git a/third_party/xla/xla/service/memory_space_assignment/algorithm.h b/third_party/xla/xla/service/memory_space_assignment/algorithm.h
+index ef7d09a2..21e69c68 100644
+--- a/third_party/xla/xla/service/memory_space_assignment/algorithm.h
++++ b/third_party/xla/xla/service/memory_space_assignment/algorithm.h
+@@ -764,6 +764,15 @@ class MsaAlgorithm : public GlobalDecreasingSizeBestFitHeap<HloValue> {
+       absl::flat_hash_map<const HloComputation*, AliasedOffset*>&
+           preferred_offset_for_computation);
+ 
++  // For conditional uses where the operand is already in alternate memory,
++  // checks if all uses inside the branch computations can work with alternate
++  // memory. If so, creates mirrored allocations in alternate memory for the
++  // branch parameters, avoiding unnecessary eviction and re-prefetch. Returns
++  // true if the optimization was applied (eviction can be skipped).
++  bool MaybeCreateMirroredAllocationForConditionalUse(
++      const AllocationValue& allocation_value, const AllocationValue::Use& use,
++      int64_t use_time, absl::Span<AllocationValue> allocation_values);
++
+   // Creates a detailed memory allocation request for a given use of an
+   // allocation value. Analyzes the usage pattern of the use to determine if it
+   // can be placed in alternate memory, considering the restrictions for loops
+@@ -1390,6 +1399,11 @@ class MsaAlgorithm : public GlobalDecreasingSizeBestFitHeap<HloValue> {
+   // Vector to preserve insertion order for deterministic window prefetching
+   // results.
+   std::vector<HloUse> uses_in_default_memory_;
++
++  // Tracks conditional instructions where mirrored alternate-memory allocations
++  // were created for branch parameters, avoiding unnecessary eviction.
++  absl::flat_hash_set<const HloInstruction*>
++      conditionals_with_mirrored_alternate_mem_;
+ };
+ 
+ }  // namespace memory_space_assignment
+diff --git a/third_party/xla/xla/service/memory_space_assignment/allocation.cc b/third_party/xla/xla/service/memory_space_assignment/allocation.cc
+index 04f6335b..45328c4a 100644
+--- a/third_party/xla/xla/service/memory_space_assignment/allocation.cc
++++ b/third_party/xla/xla/service/memory_space_assignment/allocation.cc
+@@ -840,7 +840,13 @@ HloPosition MirroredAllocation::defining_position() const {
+ }
+ 
+ std::string MirroredAllocation::ToString() const {
+-  return absl::StrCat("Mirrored Allocation for ",
++  std::string memory_space_str = MemorySpaceToString(memory_space());
++  std::optional<HeapSimulator::Chunk> chunk = maybe_chunk();
++  if (chunk) {
++    absl::StrAppend(&memory_space_str, " (off: ", chunk->offset,
++                    ", size: ", chunk->size, ")");
++  }
++  return absl::StrCat("Mirrored Allocation in ", memory_space_str, " for ",
+                       original_allocation_.ToString());
+ }
+ 
+@@ -859,8 +865,24 @@ MirroredAllocation::MirroredAllocation(const Allocation& original_allocation,
+                  /*cross_program_prefetch_index=*/std::nullopt),
+       original_allocation_(original_allocation) {}
+ 
++MirroredAllocation::MirroredAllocation(const Allocation& original_allocation,
++                                       int64_t time,
++                                       MemorySpace memory_space)
++    : Allocation(original_allocation.defining_position(), memory_space,
++                 original_allocation.maybe_chunk(),
++                 /*start_time=*/time,
++                 /*end_time=*/time,
++                 /*cross_program_prefetch_index=*/std::nullopt),
++      original_allocation_(original_allocation) {}
++
+ absl::Status MirroredAllocation::Process(
+     const BitcastSplitFn& bitcast_split_fn) {
++  // For mirrored allocations in alternate memory (e.g., conditional branch
++  // parameters that share the parent's VMEM chunk), there's no need to create
++  // new instructions - the buffer is already at the correct location.
++  if (memory_space() == MemorySpace::kAlternate) {
++    return absl::OkStatus();
++  }
+   set_original_defining_position(original_allocation_.defining_position());
+   HloInstruction* producing_instruction = AddGetTupleElements();
+   HloComputation* computation = producing_instruction->parent();
+diff --git a/third_party/xla/xla/service/memory_space_assignment/allocation.h b/third_party/xla/xla/service/memory_space_assignment/allocation.h
+index 20f4a7e2..f9fb400a 100644
+--- a/third_party/xla/xla/service/memory_space_assignment/allocation.h
++++ b/third_party/xla/xla/service/memory_space_assignment/allocation.h
+@@ -558,6 +558,11 @@ class WindowPrefetchedAllocation final : public Allocation {
+ class MirroredAllocation final : public Allocation {
+  public:
+   MirroredAllocation(const Allocation& original_allocation, int64_t time);
++  // Construct a MirroredAllocation with an explicit memory space, allowing
++  // mirrored allocations in alternate memory (e.g., for conditional operands
++  // that are already pinned in VMEM).
++  MirroredAllocation(const Allocation& original_allocation, int64_t time,
++                     MemorySpace memory_space);
+ 
+   // Overridden methods
+   //
+diff --git a/third_party/xla/xla/service/memory_space_assignment/memory_space_assignment.cc b/third_party/xla/xla/service/memory_space_assignment/memory_space_assignment.cc
+index eec55b4a..9fa9ddc3 100644
+--- a/third_party/xla/xla/service/memory_space_assignment/memory_space_assignment.cc
++++ b/third_party/xla/xla/service/memory_space_assignment/memory_space_assignment.cc
+@@ -358,8 +358,12 @@ absl::Status MemorySpaceAssignment::VerifyAllocations() const {
+   };
+   // Verify that all alternate memory allocations are free of overlapping
+   // Allocations in time and space, and add them to interval_tree one by one.
++  // Skip MirroredAllocations in alternate memory since they represent
++  // references to the same physical chunk as the original allocation (used for
++  // conditional branch parameters that share the parent's VMEM allocation).
+   for (const auto& allocation : allocations_) {
+-    if (allocation->memory_space() == MemorySpace::kAlternate) {
++    if (allocation->memory_space() == MemorySpace::kAlternate &&
++        dynamic_cast<const MirroredAllocation*>(allocation.get()) == nullptr) {
+       TF_RETURN_IF_ERROR(add_allocation_and_verify(allocation.get()));
+     }
+   }
+diff --git a/third_party/xla/xla/service/memory_space_assignment/memory_space_assignment_test.cc b/third_party/xla/xla/service/memory_space_assignment/memory_space_assignment_test.cc
+index 9fc19b9f..c4da6cc5 100644
+--- a/third_party/xla/xla/service/memory_space_assignment/memory_space_assignment_test.cc
++++ b/third_party/xla/xla/service/memory_space_assignment/memory_space_assignment_test.cc
+@@ -3992,6 +3992,125 @@ TEST_F(MemorySpaceAssignmentTest, ConditionalMultiUse) {
+   EXPECT_EQ(add1_operand->opcode(), HloOpcode::kCopyDone);
+ }
+ 
++TEST_F(MemorySpaceAssignmentTest,
++       ConditionalSkipsEvictionWhenOperandPinnedInAlternateMem) {
++  // When a buffer is in alternate memory and all uses inside conditional
++  // branches can use alternate memory, the algorithm should skip the eviction
++  // and keep the buffer in alternate memory for the subsequent use.
++  absl::string_view hlo_string = R"hlo(
++  HloModule CondAllocation, is_scheduled=true
++
++  true_computation {
++    p0 = (f32[3]{0}) parameter(0)
++    gte = f32[3]{0} get-tuple-element(p0), index=0
++    ROOT neg1 = f32[3]{0} negate(gte)
++  }
++
++  false_computation {
++    p0 = (f32[3]{0}) parameter(0)
++    gte = f32[3]{0} get-tuple-element(p0), index=0
++    ROOT neg2 = f32[3]{0} negate(gte)
++  }
++
++  ENTRY entry {
++    p0 = f32[3]{0} parameter(0)
++    p1 = pred[] parameter(1)
++    copy = f32[3]{0} copy(p0)
++    tuple = (f32[3]{0}) tuple(copy)
++    conditional = f32[3]{0} conditional(p1, tuple, tuple), true_computation=true_computation, false_computation=false_computation
++    ROOT add = f32[3]{0} add(copy, conditional)
++  }
++  )hlo";
++  TF_ASSERT_OK_AND_ASSIGN(auto module,
++                          ParseAndReturnVerifiedModule(hlo_string));
++  Options options = DefaultMemorySpaceOptions();
++  options.enable_conditional_redundant_eviction_elimination = true;
++  AssignMemorySpace(module.get(), options);
++
++  // copy should be in alternate memory.
++  auto copy =
++      module->GetComputationWithName("entry")->GetInstructionWithName("copy");
++  EXPECT_EQ(copy->shape().layout().memory_space(), kAlternateMemorySpace);
++
++  // Branch parameters should get alternate memory from the mirrored allocation.
++  auto neg1 = module->GetComputationWithName("true_computation")
++                  ->GetInstructionWithName("neg1");
++  auto neg1_operand = neg1->operand(0);
++  EXPECT_EQ(neg1_operand->shape().layout().memory_space(),
++            kAlternateMemorySpace);
++  auto neg2 = module->GetComputationWithName("false_computation")
++                  ->GetInstructionWithName("neg2");
++  auto neg2_operand = neg2->operand(0);
++  EXPECT_EQ(neg2_operand->shape().layout().memory_space(),
++            kAlternateMemorySpace);
++
++  // The subsequent use (add) should also be able to use alternate memory
++  // without needing a re-prefetch, since the eviction was skipped.
++  auto add =
++      module->GetComputationWithName("entry")->GetInstructionWithName("add");
++  auto add_operand = add->operand(0);
++  EXPECT_EQ(add_operand->shape().layout().memory_space(),
++            kAlternateMemorySpace);
++}
++
++TEST_F(MemorySpaceAssignmentTest,
++       ConditionalFallsBackToEvictionWhenBranchUseFar) {
++  // When a branch has uses that are too far from the parameter (can't fit in
++  // alternate memory without a copy), the optimization should fall back to
++  // eviction.
++  absl::string_view hlo_string = R"hlo(
++  HloModule CondAllocation, is_scheduled=true
++
++  true_computation {
++    p0 = (f32[3]{0}, f32[3]{0}) parameter(0)
++    gte0 = f32[3]{0} get-tuple-element(p0), index=0
++    neg0 = f32[3]{0} negate(gte0)
++    neg1 = f32[3]{0} negate(neg0)
++    neg2 = f32[3]{0} negate(neg1)
++    neg3 = f32[3]{0} negate(neg2)
++    neg4 = f32[3]{0} negate(neg3)
++    neg5 = f32[3]{0} negate(neg4)
++    neg6 = f32[3]{0} negate(neg5)
++    neg7 = f32[3]{0} negate(neg6)
++    neg8 = f32[3]{0} negate(neg7)
++    neg9 = f32[3]{0} negate(neg8)
++    gte1 = f32[3]{0} get-tuple-element(p0), index=1
++    ROOT add = f32[3]{0} add(neg9, gte1)
++  }
++
++  false_computation {
++    p0 = (f32[3]{0}) parameter(0)
++    gte = f32[3]{0} get-tuple-element(p0), index=0
++    ROOT neg = f32[3]{0} negate(gte)
++  }
++
++  ENTRY entry {
++    p0 = f32[3]{0} parameter(0)
++    p1 = pred[] parameter(1)
++    copy0 = f32[3]{0} copy(p0)
++    copy1 = f32[3]{0} copy(p0)
++    tuple0 = (f32[3]{0}, f32[3]{0}) tuple(copy0, copy1)
++    tuple1 = (f32[3]{0}) tuple(copy0)
++    conditional = f32[3]{0} conditional(p1, tuple0, tuple1), true_computation=true_computation, false_computation=false_computation
++    ROOT add1 = f32[3]{0} add(copy1, conditional)
++  }
++  )hlo";
++  TF_ASSERT_OK_AND_ASSIGN(auto module,
++                          ParseAndReturnVerifiedModule(hlo_string));
++  Options options = DefaultMemorySpaceOptions();
++  options.enable_conditional_redundant_eviction_elimination = true;
++  AssignMemorySpace(module.get(), options);
++
++  // copy1 has a long use chain in true_computation (gte1 used after 10
++  // negates), so the mirrored allocation optimization should NOT apply.
++  // The subsequent use (add1) should get copy1 from default memory (evicted).
++  auto add1 =
++      module->GetComputationWithName("entry")->GetInstructionWithName("add1");
++  auto add1_operand = add1->operand(0);
++  EXPECT_EQ(add1_operand->shape().layout().memory_space(), kDefaultMemorySpace);
++  EXPECT_EQ(add1_operand->opcode(), HloOpcode::kCopyDone);
++}
++
+ TEST_F(MemorySpaceAssignmentTest, ConditionalMultiUseInWhile) {
+   absl::string_view hlo_string = R"hlo(
+   HloModule CondAllocation, is_scheduled=true
+diff --git a/third_party/xla/xla/service/memory_space_assignment/options.h b/third_party/xla/xla/service/memory_space_assignment/options.h
+index 3fbfc5e1..0027cdf6 100644
+--- a/third_party/xla/xla/service/memory_space_assignment/options.h
++++ b/third_party/xla/xla/service/memory_space_assignment/options.h
+@@ -332,6 +332,13 @@ struct Options {
+   // addition to alternate memory to eliminate redundant evictions.
+   bool enable_while_redundant_eviction_elimination = true;
+ 
++  // Enable redundant eviction elimination for conditional operands. When a
++  // buffer is already in alternate memory and is passed into a conditional, skip
++  // the eviction if all uses inside the branches can use alternate memory.
++  // Branch parameters get mirrored allocations pointing to the same alternate
++  // memory chunk.
++  bool enable_conditional_redundant_eviction_elimination = false;
++
+   // An optional memory space assignment autotuning config, which is used
+   // to sort allocated buffers.
+   std::optional<std::vector<uint64_t>> autotuning_config = std::nullopt;

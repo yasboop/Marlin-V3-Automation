@@ -1,0 +1,500 @@
+diff --git a/jadx-core/src/main/java/jadx/core/dex/nodes/BlockNode.java b/jadx-core/src/main/java/jadx/core/dex/nodes/BlockNode.java
+index 6814de2..7b404f6 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/nodes/BlockNode.java
++++ b/jadx-core/src/main/java/jadx/core/dex/nodes/BlockNode.java
+@@ -61,6 +61,16 @@ public final class BlockNode extends AttrNode implements IBlock, Comparable<Bloc
+ 	 */
+ 	private List<BlockNode> dominatesOn = new ArrayList<>(3);
+ 
++	/**
++	 * All post-dominators, excluding self
++	 */
++	private BitSet pDoms = EmptyBitSet.EMPTY;
++
++	/**
++	 * Immediate post-dominator
++	 */
++	private BlockNode ipdom;
++
+ 	public BlockNode(int cid, int id, int offset) {
+ 		this.cid = cid;
+ 		this.id = id;
+@@ -192,6 +202,26 @@ public void addDominatesOn(BlockNode block) {
+ 		dominatesOn.add(block);
+ 	}
+ 
++	public boolean isPostDominator(BlockNode block) {
++		return pDoms.get(block.getId());
++	}
++
++	public BitSet getPostDoms() {
++		return pDoms;
++	}
++
++	public void setPostDoms(BitSet pDoms) {
++		this.pDoms = pDoms;
++	}
++
++	public BlockNode getIPostDom() {
++		return ipdom;
++	}
++
++	public void setIPostDom(BlockNode ipdom) {
++		this.ipdom = ipdom;
++	}
++
+ 	public boolean isSynthetic() {
+ 		return contains(AFlag.SYNTHETIC);
+ 	}
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/blocks/BlockProcessor.java b/jadx-core/src/main/java/jadx/core/dex/visitors/blocks/BlockProcessor.java
+index 66fcb10..c52f335 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/blocks/BlockProcessor.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/blocks/BlockProcessor.java
+@@ -67,6 +67,7 @@ private static void processBlocksTree(MethodNode mth) {
+ 		checkForUnreachableBlocks(mth);
+ 
+ 		DominatorTree.computeDominanceFrontier(mth);
++		DominatorTree.computePostDominators(mth);
+ 		registerLoops(mth);
+ 		processNestedLoops(mth);
+ 
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/blocks/DominatorTree.java b/jadx-core/src/main/java/jadx/core/dex/visitors/blocks/DominatorTree.java
+index 7fdcc9e..30a3d42 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/blocks/DominatorTree.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/blocks/DominatorTree.java
+@@ -130,6 +130,150 @@ private static BitSet collectDoms(BlockNode[] doms, BlockNode idom) {
+ 		return domBS;
+ 	}
+ 
++	public static void computePostDominators(MethodNode mth) {
++		List<BlockNode> reverseSorted = sortBlocksReverse(mth);
++		BlockNode[] pdoms = buildPostDoms(reverseSorted);
++		applyPostDoms(reverseSorted, pdoms);
++	}
++
++	private static List<BlockNode> sortBlocksReverse(MethodNode mth) {
++		List<BlockNode> blocks = mth.getBasicBlocks();
++		int blocksCount = blocks.size();
++		// Build a reverse-post-order from exit block using predecessors
++		List<BlockNode> sorted = new ArrayList<>(blocksCount);
++		BlockUtils.reverseDfsVisit(mth, sorted::add);
++		// Some blocks may not be reachable from exit in reverse (e.g., infinite loops).
++		// Add any missing blocks at the end.
++		if (sorted.size() != blocksCount) {
++			BitSet visited = new BitSet(blocksCount);
++			for (BlockNode b : sorted) {
++				visited.set(b.getId());
++			}
++			for (BlockNode b : blocks) {
++				if (!visited.get(b.getId())) {
++					sorted.add(b);
++				}
++			}
++		}
++		return sorted;
++	}
++
++	@NotNull
++	private static BlockNode[] buildPostDoms(List<BlockNode> sorted) {
++		int blocksCount = sorted.size();
++		// Map from block's original ID to index in sorted list
++		int[] idToIndex = new int[blocksCount];
++		for (int i = 0; i < blocksCount; i++) {
++			idToIndex[sorted.get(i).getId()] = i;
++		}
++
++		BlockNode[] pdoms = new BlockNode[blocksCount];
++		pdoms[0] = sorted.get(0); // exit block is its own post-dominator
++		boolean changed = true;
++		while (changed) {
++			changed = false;
++			for (int idx = 1; idx < blocksCount; idx++) {
++				BlockNode b = sorted.get(idx);
++				// For post-dominators, use successors (reverse of predecessors for dominators)
++				List<BlockNode> succs = b.getSuccessors();
++				int pickedSucc = -1;
++				BlockNode newIPDom = null;
++				for (BlockNode succ : succs) {
++					int succIdx = idToIndex[succ.getId()];
++					if (pdoms[succIdx] != null) {
++						newIPDom = succ;
++						pickedSucc = succIdx;
++						break;
++					}
++				}
++				if (newIPDom == null) {
++					// Block has no processed successors yet, skip for now
++					continue;
++				}
++				for (BlockNode succ : succs) {
++					int succIdx = idToIndex[succ.getId()];
++					if (succIdx == pickedSucc) {
++						continue;
++					}
++					if (pdoms[succIdx] != null) {
++						newIPDom = intersectPostDom(sorted, pdoms, idToIndex, succ, newIPDom);
++					}
++				}
++				int blockIdx = idToIndex[b.getId()];
++				if (pdoms[blockIdx] != newIPDom) {
++					pdoms[blockIdx] = newIPDom;
++					changed = true;
++				}
++			}
++		}
++		return pdoms;
++	}
++
++	private static BlockNode intersectPostDom(List<BlockNode> sorted, BlockNode[] pdoms, int[] idToIndex,
++			BlockNode b1, BlockNode b2) {
++		int f1 = idToIndex[b1.getId()];
++		int f2 = idToIndex[b2.getId()];
++		while (f1 != f2) {
++			while (f1 > f2) {
++				f1 = idToIndex[pdoms[f1].getId()];
++			}
++			while (f2 > f1) {
++				f2 = idToIndex[pdoms[f2].getId()];
++			}
++		}
++		return sorted.get(f1);
++	}
++
++	private static void applyPostDoms(List<BlockNode> sorted, BlockNode[] pdoms) {
++		BlockNode exitBlock = sorted.get(0);
++		exitBlock.setPostDoms(EmptyBitSet.EMPTY);
++		exitBlock.setIPostDom(null);
++
++		int blocksCount = sorted.size();
++		// Build id-to-index mapping
++		int[] idToIndex = new int[blocksCount];
++		for (int i = 0; i < blocksCount; i++) {
++			idToIndex[sorted.get(i).getId()] = i;
++		}
++
++		for (int i = 1; i < blocksCount; i++) {
++			BlockNode block = sorted.get(i);
++			BlockNode ipdom = pdoms[i];
++			if (ipdom == null) {
++				block.setPostDoms(EmptyBitSet.EMPTY);
++				block.setIPostDom(null);
++				continue;
++			}
++			block.setIPostDom(ipdom);
++			BitSet pdomBS = collectPostDoms(pdoms, idToIndex, ipdom, blocksCount);
++			pdomBS.clear(block.getId());
++			block.setPostDoms(pdomBS);
++		}
++	}
++
++	private static BitSet collectPostDoms(BlockNode[] pdoms, int[] idToIndex, BlockNode ipdom, int blocksCount) {
++		BitSet pdomBS = new BitSet(blocksCount);
++		BlockNode next = ipdom;
++		while (true) {
++			int origId = next.getId();
++			if (pdomBS.get(origId)) {
++				break;
++			}
++			pdomBS.set(origId);
++			BitSet curPDoms = next.getPostDoms();
++			if (curPDoms != null && curPDoms != EmptyBitSet.EMPTY) {
++				pdomBS.or(curPDoms);
++				break;
++			}
++			int idx = idToIndex[origId];
++			if (pdoms[idx] == null || pdoms[idx] == next) {
++				break;
++			}
++			next = pdoms[idx];
++		}
++		return pdomBS;
++	}
++
+ 	public static void computeDominanceFrontier(MethodNode mth) {
+ 		List<BlockNode> blocks = mth.getBasicBlocks();
+ 		for (BlockNode block : blocks) {
+diff --git a/jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.java b/jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.java
+index e83188c..88d5cd5 100644
+--- a/jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.java
++++ b/jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.java
+@@ -2,7 +2,6 @@
+ 
+ import java.util.ArrayList;
+ import java.util.BitSet;
+-import java.util.Collections;
+ import java.util.HashSet;
+ import java.util.LinkedHashMap;
+ import java.util.LinkedHashSet;
+@@ -798,7 +797,7 @@ private BlockNode processSwitch(IRegion currentRegion, BlockNode block, SwitchIn
+ 		BlockNode out;
+ 		LoopInfo loop = mth.getLoopForBlock(block);
+ 		if (loop == null) {
+-			out = calcPostDomOut(mth, block, mth.getPreExitBlocks());
++			out = calcSwitchOut(mth, block, null);
+ 		} else {
+ 			BlockNode loopEnd = loop.getEnd();
+ 			stack.addExit(loop.getStart());
+@@ -808,18 +807,25 @@ private BlockNode processSwitch(IRegion currentRegion, BlockNode block, SwitchIn
+ 				// in exits or last insn in loop => no 'out' block
+ 				out = null;
+ 			} else {
+-				// treat 'continue' as exit
+-				out = calcPostDomOut(mth, block, loopEnd.getPredecessors());
+-				if (out != null) {
+-					insertContinueInSwitch(block, out, loopEnd);
+-				} else {
+-					// no 'continue'
+-					out = calcPostDomOut(mth, block, Collections.singletonList(loopEnd));
++				out = calcSwitchOut(mth, block, loop);
++				if (out != null && out != loopEnd) {
++					// insert 'continue' only when at least one case bypasses 'out'
++					// and goes straight to the loop end block
++					int loopEndId = loopEnd.getId();
++					boolean hasDirectLoopEnd = false;
++					for (BlockNode s : block.getCleanSuccessors()) {
++						if (s.getDomFrontier().get(loopEndId) && s != out) {
++							hasDirectLoopEnd = true;
++							break;
++						}
++					}
++					if (hasDirectLoopEnd) {
++						insertContinueInSwitch(block, out, loopEnd);
++					}
++				}
++				if (out == loop.getStart()) {
++					out = null;
+ 				}
+-			}
+-			if (out == loop.getStart()) {
+-				// no other outs instead back edge to loop start
+-				out = null;
+ 			}
+ 		}
+ 		if (out != null && processedBlocks.get(out.getId())) {
+@@ -887,10 +893,8 @@ private BlockNode searchFallThroughCase(BlockNode successor, BlockNode out, BitS
+ 		if (df.intersects(caseBlocks)) {
+ 			return getOneIntersectionBlock(out, caseBlocks, df);
+ 		}
+-		Set<BlockNode> allPathsBlocks = BlockUtils.getAllPathsBlocks(successor, out);
+-		Map<BlockNode, BitSet> bitSetMap = BlockUtils.calcPartialPostDominance(mth, allPathsBlocks, out);
+-		BitSet pdoms = bitSetMap.get(successor);
+-		if (pdoms != null && pdoms.intersects(caseBlocks)) {
++		BitSet pdoms = successor.getPostDoms();
++		if (pdoms != null && !pdoms.isEmpty() && pdoms.intersects(caseBlocks)) {
+ 			return getOneIntersectionBlock(out, caseBlocks, pdoms);
+ 		}
+ 		return null;
+@@ -905,32 +909,43 @@ private BlockNode getOneIntersectionBlock(BlockNode out, BitSet caseBlocks, BitS
+ 	}
+ 
+ 	@Nullable
+-	private static BlockNode calcPostDomOut(MethodNode mth, BlockNode block, List<BlockNode> exits) {
+-		if (exits.size() == 1 && mth.getExitBlock().equals(exits.get(0))) {
+-			// simple case: for only one exit which is equal to method exit block
+-			return BlockUtils.calcImmediatePostDominator(mth, block);
++	private static BlockNode calcSwitchOut(MethodNode mth, BlockNode block, @Nullable LoopInfo loop) {
++		// use cached immediate post-dominator
++		BlockNode ipdom = block.getIPostDom();
++		if (ipdom != null && ipdom != mth.getExitBlock()) {
++			if (loop == null) {
++				return ipdom;
++			}
++			// only accept ipdom if it's actually inside the loop body
++			if (loop.getLoopBlocks().contains(ipdom)
++					&& ipdom != loop.getStart() && ipdom != loop.getEnd()) {
++				return ipdom;
++			}
+ 		}
+-		// fast search: union of blocks dominance frontier
+-		// work if no fallthrough cases and no returns inside switch
++		// fallback: at least one case exits the loop/method directly,
++		// so the global ipdom points past the real convergence point.
++		// Use dominance frontier union of the case blocks to find it.
+ 		BitSet outs = BlockUtils.copyBlocksBitSet(mth, block.getDomFrontier());
+ 		for (BlockNode s : block.getCleanSuccessors()) {
+ 			outs.or(s.getDomFrontier());
+ 		}
+ 		outs.clear(block.getId());
+-
+-		if (outs.cardinality() != 1) {
+-			// slow search: calculate partial post-dominance for every exit node
+-			BitSet ipdoms = BlockUtils.newBlocksBitSet(mth);
+-			for (BlockNode exitBlock : exits) {
+-				if (BlockUtils.isAnyPathExists(block, exitBlock)) {
+-					Set<BlockNode> pathBlocks = BlockUtils.getAllPathsBlocks(block, exitBlock);
+-					BlockNode ipdom = BlockUtils.calcPartialImmediatePostDominator(mth, block, pathBlocks, exitBlock);
+-					if (ipdom != null) {
+-						ipdoms.set(ipdom.getId());
+-					}
++		outs.clear(mth.getExitBlock().getId());
++		if (loop != null) {
++			outs.clear(loop.getStart().getId());
++		}
++		if (outs.cardinality() > 1) {
++			// prefer the earliest convergence point: drop any candidate that
++			// post-dominates another candidate
++			List<BlockNode> blocks = mth.getBasicBlocks();
++			BitSet laterBlocks = BlockUtils.newBlocksBitSet(mth);
++			for (int i = outs.nextSetBit(0); i >= 0; i = outs.nextSetBit(i + 1)) {
++				BitSet pdoms = blocks.get(i).getPostDoms();
++				if (pdoms != null) {
++					laterBlocks.or(pdoms);
+ 				}
+ 			}
+-			outs.and(ipdoms);
++			outs.andNot(laterBlocks);
+ 		}
+ 		return BlockUtils.bitSetToOneBlock(mth, outs);
+ 	}
+diff --git a/jadx-core/src/main/java/jadx/core/utils/BlockUtils.java b/jadx-core/src/main/java/jadx/core/utils/BlockUtils.java
+index ec70005..9ad0654 100644
+--- a/jadx-core/src/main/java/jadx/core/utils/BlockUtils.java
++++ b/jadx-core/src/main/java/jadx/core/utils/BlockUtils.java
+@@ -7,11 +7,9 @@
+ import java.util.Collection;
+ import java.util.Collections;
+ import java.util.Deque;
+-import java.util.HashMap;
+ import java.util.HashSet;
+ import java.util.LinkedHashSet;
+ import java.util.List;
+-import java.util.Map;
+ import java.util.Queue;
+ import java.util.Set;
+ import java.util.function.Consumer;
+@@ -491,6 +489,31 @@ public static void dfsVisit(MethodNode mth, Consumer<BlockNode> visitor) {
+ 		dfsVisit(mth, mth.getEnterBlock(), false, visitor);
+ 	}
+ 
++	public static void reverseDfsVisit(MethodNode mth, Consumer<BlockNode> visitor) {
++		BlockNode exitBlock = mth.getExitBlock();
++		BitSet visited = newBlocksBitSet(mth);
++		Deque<BlockNode> queue = new ArrayDeque<>();
++		queue.addLast(exitBlock);
++		visited.set(exitBlock.getId());
++		while (true) {
++			BlockNode current = queue.pollLast();
++			if (current == null) {
++				return;
++			}
++			visitor.accept(current);
++			List<BlockNode> predecessors = current.getPredecessors();
++			int count = predecessors.size();
++			for (int i = count - 1; i >= 0; i--) {
++				BlockNode next = predecessors.get(i);
++				int nextId = next.getId();
++				if (!visited.get(nextId)) {
++					queue.addLast(next);
++					visited.set(nextId);
++				}
++			}
++		}
++	}
++
+ 	private static void dfsVisit(MethodNode mth, BlockNode startBlock, boolean clean, Consumer<BlockNode> visitor) {
+ 		BitSet visited = newBlocksBitSet(mth);
+ 		Deque<BlockNode> queue = new ArrayDeque<>();
+@@ -1156,103 +1179,6 @@ public static boolean replaceInsn(MethodNode mth, InsnNode oldInsn, InsnNode new
+ 		return false;
+ 	}
+ 
+-	public static Map<BlockNode, BitSet> calcPostDominance(MethodNode mth) {
+-		return calcPartialPostDominance(mth, mth.getBasicBlocks(), mth.getPreExitBlocks().get(0));
+-	}
+-
+-	public static Map<BlockNode, BitSet> calcPartialPostDominance(MethodNode mth, Collection<BlockNode> blockNodes, BlockNode exitBlock) {
+-		int blocksCount = mth.getBasicBlocks().size();
+-		Map<BlockNode, BitSet> map = new HashMap<>(blocksCount);
+-
+-		BitSet initSet = new BitSet(blocksCount);
+-		for (BlockNode block : blockNodes) {
+-			initSet.set(block.getId());
+-		}
+-
+-		for (BlockNode block : blockNodes) {
+-			BitSet postDoms = new BitSet(blocksCount);
+-			postDoms.or(initSet);
+-			map.put(block, postDoms);
+-		}
+-		BitSet exitBitSet = map.get(exitBlock);
+-		exitBitSet.clear();
+-		exitBitSet.set(exitBlock.getId());
+-
+-		BitSet domSet = new BitSet(blocksCount);
+-		boolean changed;
+-		do {
+-			changed = false;
+-			for (BlockNode block : blockNodes) {
+-				if (block == exitBlock) {
+-					continue;
+-				}
+-				BitSet d = map.get(block);
+-				if (!changed) {
+-					domSet.clear();
+-					domSet.or(d);
+-				}
+-				for (BlockNode scc : block.getSuccessors()) {
+-					BitSet scPDoms = map.get(scc);
+-					if (scPDoms != null) {
+-						d.and(scPDoms);
+-					}
+-				}
+-				d.set(block.getId());
+-				if (!changed && !d.equals(domSet)) {
+-					changed = true;
+-					map.put(block, d);
+-				}
+-			}
+-		} while (changed);
+-
+-		blockNodes.forEach(block -> {
+-			BitSet postDoms = map.get(block);
+-			postDoms.clear(block.getId());
+-			if (postDoms.isEmpty()) {
+-				map.put(block, EmptyBitSet.EMPTY);
+-			}
+-		});
+-		return map;
+-	}
+-
+-	@Nullable
+-	public static BlockNode calcImmediatePostDominator(MethodNode mth, BlockNode block) {
+-		BlockNode oneSuccessor = Utils.getOne(block.getSuccessors());
+-		if (oneSuccessor != null) {
+-			return oneSuccessor;
+-		}
+-		return calcImmediatePostDominator(mth, block, calcPostDominance(mth));
+-	}
+-
+-	@Nullable
+-	public static BlockNode calcPartialImmediatePostDominator(MethodNode mth, BlockNode block,
+-			Collection<BlockNode> blockNodes, BlockNode exitBlock) {
+-		BlockNode oneSuccessor = Utils.getOne(block.getSuccessors());
+-		if (oneSuccessor != null) {
+-			return oneSuccessor;
+-		}
+-		Map<BlockNode, BitSet> pDomsMap = calcPartialPostDominance(mth, blockNodes, exitBlock);
+-		return calcImmediatePostDominator(mth, block, pDomsMap);
+-	}
+-
+-	@Nullable
+-	public static BlockNode calcImmediatePostDominator(MethodNode mth, BlockNode block, Map<BlockNode, BitSet> postDomsMap) {
+-		BlockNode oneSuccessor = Utils.getOne(block.getSuccessors());
+-		if (oneSuccessor != null) {
+-			return oneSuccessor;
+-		}
+-		List<BlockNode> basicBlocks = mth.getBasicBlocks();
+-		BitSet postDoms = postDomsMap.get(block);
+-		BitSet bs = copyBlocksBitSet(mth, postDoms);
+-		for (int i = bs.nextSetBit(0); i >= 0; i = bs.nextSetBit(i + 1)) {
+-			BlockNode pdomBlock = basicBlocks.get(i);
+-			BitSet pdoms = postDomsMap.get(pdomBlock);
+-			if (pdoms != null) {
+-				bs.andNot(pdoms);
+-			}
+-		}
+-		return bitSetToOneBlock(mth, bs);
+-	}
+ 
+ 	public static BlockNode getTopSplitterForHandler(BlockNode handlerBlock) {
+ 		BlockNode block = getBlockWithFlag(handlerBlock.getPredecessors(), AFlag.EXC_TOP_SPLITTER);

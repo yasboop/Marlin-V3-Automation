@@ -1,0 +1,1720 @@
+ ▐▛███▜▌   Claude Code v2.1.85
+▝▜█████▛▘  Opus 4.6 · API Usage Billing
+  ▘▘ ▝▝    ~/.cache/claude-hfi/-Users-yashverma-Downloads-jadx-2054/A
+
+  Debug mode enabled
+  Logging to: /var/folders/wv/zplv7lv92m32p0l4fs0gj_qr0000gn/T/claude-hfi/54b
+  a2019-7715-46ac-b630-5674af9fcf44/debug.txt
+
+❯ The processSwitch method in RegionMaker is taking a surprisingly large
+share of total decompilation time. Profiling shows the bottleneck is in
+post-dominator computation - right now BlockUtils.calcPostDominance and
+calcPartialPostDominance are getting called repeatedly during switch case
+processing, each time building a fresh HashMap from scratch for almost every
+ case in every switch. Apps that went through Redex optimization tend to
+have lots of large switches which makes this really noticeable.
+
+The dominator tree is already computed once per method and cached on
+BlockNode (the doms and idom fields). Post-dominators should work the same
+way - compute them once during block processing, store them on the block
+nodes, and then RegionMaker can just read the cached info instead of
+recomputing.
+
+The existing DominatorTree uses an iterative algorithm that should be
+reusable for post-dominators if you reverse the graph traversal direction.
+Post-dominator computation walks backwards from the exit block and uses
+successors where the forward computation uses predecessors.
+
+After caching post-dom info on block nodes, the switch out-block search and
+fallthrough detection in RegionMaker needs to be updated to use it instead
+of the old on-demand calculations. The old utility methods in BlockUtils for
+ partial post-dominance wont be needed anymore, those should go. The DFS
+traversal in BlockUtils needs to support reverse direction for the backwards
+ walk. All existing tests including the switch decompilation tests should
+pass without issues.
+
+⏺ Let me start by understanding the relevant code structure.
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+⏺ Bash(find /Users/yashverma/.cache/claude-hfi/-Users-yashverma-Downloads-jad
+      x-2054/A -type f -name "*.java" | xargs grep -l
+      "PostDominan\|postDom\|calcPostDom\|calcPa…)
+  ⎿  /Users/yashverma/.cache/claude-hfi/-Users-yashverma-Downloads-jadx-
+     2054/A/jadx-core/src/main/java/jadx/core/utils/BlockUtils.java
+     /Users/yashverma/.cache/claude-hfi/-Users-yashverma-Downloads-jadx-
+     … +2 lines (ctrl+o to expand)
+
+⏺ Bash(find /Users/yashverma/.cache/claude-hfi/-Users-yashverma-Downloads-jad
+      x-2054/A -type f -name "*.java" | xargs grep -l
+      "DominatorTree\|BlockNode\|RegionMaker\|Bl…)
+  ⎿  /Users/yashverma/.cache/claude-hfi/-Users-yashverma-Downloads-jadx-
+     2054/A/jadx-core/src/test/java/jadx/tests/integration/names/TestNam
+     eAssign2.java
+     … +174 lines (ctrl+o to expand)
+
+  Read 4 files (ctrl+o to expand)
+
+⏺ Let me check where DominatorTree is called and look at MethodNode for exit
+  block info.
+
+  Searched for 2 patterns, read 1 file (ctrl+o to expand)
+
+⏺ Let me check all callers of the methods I plan to modify/remove.
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+⏺ Now I have a complete picture. Let me implement the changes:
+
+  1. BlockNode - Add pDoms and ipdom (post-dominator) fields
+  2. BlockUtils - Add reverse DFS, remove old post-dom methods, add cached
+  ipdom accessor
+  3. DominatorTree - Add computePostDominators() method
+  4. BlockProcessor - Call post-dom computation after dominance frontier
+  5. RegionMaker - Use cached post-dom info
+
+  Let's start:
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/nodes/BlockNode.java)
+  ⎿  Added 10 lines
+      61     */
+      62    private List<BlockNode> dominatesOn = new ArrayList<>(3);
+      63
+      64 +  /**
+      65 +   * All post-dominators, excluding self
+      66 +   */
+      67 +  private BitSet pDoms = EmptyBitSet.EMPTY;
+      68 +
+      69 +  /**
+      70 +   * Immediate post-dominator
+      71 +   */
+      72 +  private BlockNode ipdom;
+      73 +
+      74    public BlockNode(int cid, int id, int offset) {
+      75      this.cid = cid;
+      76      this.id = id;
+
+⏺ Now add getters/setters for the post-dom fields, after the addDominatesOn
+  method:
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/nodes/BlockNode.java)
+  ⎿  Added 20 lines
+      202      dominatesOn.add(block);
+      203    }
+      204
+      205 +  public boolean isPostDominator(BlockNode block) {
+      206 +    return pDoms.get(block.getId());
+      207 +  }
+      208 +
+      209 +  public BitSet getPostDoms() {
+      210 +    return pDoms;
+      211 +  }
+      212 +
+      213 +  public void setPostDoms(BitSet pDoms) {
+      214 +    this.pDoms = pDoms;
+      215 +  }
+      216 +
+      217 +  public BlockNode getIPostDom() {
+      218 +    return ipdom;
+      219 +  }
+      220 +
+      221 +  public void setIPostDom(BlockNode ipdom) {
+      222 +    this.ipdom = ipdom;
+      223 +  }
+      224 +
+      225    public boolean isSynthetic() {
+      226      return contains(AFlag.SYNTHETIC);
+      227    }
+
+⏺ Now add the reverse DFS method to BlockUtils and remove old post-dom
+  methods:
+
+⏺ Update(jadx-core/src/main/java/jadx/core/utils/BlockUtils.java)
+  ⎿  Added 25 lines
+      491      dfsVisit(mth, mth.getEnterBlock(), false, visitor);
+      492    }
+      493
+      494 +  public static void reverseDfsVisit(MethodNode mth, Consum
+          +er<BlockNode> visitor) {
+      495 +    BlockNode exitBlock = mth.getExitBlock();
+      496 +    BitSet visited = newBlocksBitSet(mth);
+      497 +    Deque<BlockNode> queue = new ArrayDeque<>();
+      498 +    queue.addLast(exitBlock);
+      499 +    visited.set(exitBlock.getId());
+      500 +    while (true) {
+      501 +      BlockNode current = queue.pollLast();
+      502 +      if (current == null) {
+      503 +        return;
+      504 +      }
+      505 +      visitor.accept(current);
+      506 +      List<BlockNode> predecessors = current.getPredecessor
+          +s();
+      507 +      int count = predecessors.size();
+      508 +      for (int i = count - 1; i >= 0; i--) {
+      509 +        BlockNode next = predecessors.get(i);
+      510 +        int nextId = next.getId();
+      511 +        if (!visited.get(nextId)) {
+      512 +          queue.addLast(next);
+      513 +          visited.set(nextId);
+      514 +        }
+      515 +      }
+      516 +    }
+      517 +  }
+      518 +
+      519    private static void dfsVisit(MethodNode mth, BlockNode st
+           artBlock, boolean clean, Consumer<BlockNode> visitor) {
+      520      BitSet visited = newBlocksBitSet(mth);
+      521      Deque<BlockNode> queue = new ArrayDeque<>();
+
+⏺ Now remove the old post-dominance methods from BlockUtils:
+
+⏺ Update(jadx-core/src/main/java/jadx/core/utils/BlockUtils.java)
+  ⎿  Removed 97 lines
+      1181      return false;
+      1182    }
+      1183
+      1184 -  public static Map<BlockNode, BitSet> calcPostDominance(M
+           -ethodNode mth) {
+      1185 -    return calcPartialPostDominance(mth, mth.getBasicBlock
+           -s(), mth.getPreExitBlocks().get(0));
+      1186 -  }
+      1184
+      1188 -  public static Map<BlockNode, BitSet> calcPartialPostDomi
+           -nance(MethodNode mth, Collection<BlockNode> blockNodes, Bl
+           -ockNode exitBlock) {
+      1189 -    int blocksCount = mth.getBasicBlocks().size();
+      1190 -    Map<BlockNode, BitSet> map = new HashMap<>(blocksCount
+           -);
+      1191 -
+      1192 -    BitSet initSet = new BitSet(blocksCount);
+      1193 -    for (BlockNode block : blockNodes) {
+      1194 -      initSet.set(block.getId());
+      1195 -    }
+      1196 -
+      1197 -    for (BlockNode block : blockNodes) {
+      1198 -      BitSet postDoms = new BitSet(blocksCount);
+      1199 -      postDoms.or(initSet);
+      1200 -      map.put(block, postDoms);
+      1201 -    }
+      1202 -    BitSet exitBitSet = map.get(exitBlock);
+      1203 -    exitBitSet.clear();
+      1204 -    exitBitSet.set(exitBlock.getId());
+      1205 -
+      1206 -    BitSet domSet = new BitSet(blocksCount);
+      1207 -    boolean changed;
+      1208 -    do {
+      1209 -      changed = false;
+      1210 -      for (BlockNode block : blockNodes) {
+      1211 -        if (block == exitBlock) {
+      1212 -          continue;
+      1213 -        }
+      1214 -        BitSet d = map.get(block);
+      1215 -        if (!changed) {
+      1216 -          domSet.clear();
+      1217 -          domSet.or(d);
+      1218 -        }
+      1219 -        for (BlockNode scc : block.getSuccessors()) {
+      1220 -          BitSet scPDoms = map.get(scc);
+      1221 -          if (scPDoms != null) {
+      1222 -            d.and(scPDoms);
+      1223 -          }
+      1224 -        }
+      1225 -        d.set(block.getId());
+      1226 -        if (!changed && !d.equals(domSet)) {
+      1227 -          changed = true;
+      1228 -          map.put(block, d);
+      1229 -        }
+      1230 -      }
+      1231 -    } while (changed);
+      1232 -
+      1233 -    blockNodes.forEach(block -> {
+      1234 -      BitSet postDoms = map.get(block);
+      1235 -      postDoms.clear(block.getId());
+      1236 -      if (postDoms.isEmpty()) {
+      1237 -        map.put(block, EmptyBitSet.EMPTY);
+      1238 -      }
+      1239 -    });
+      1240 -    return map;
+      1241 -  }
+      1242 -
+      1243 -  @Nullable
+      1244 -  public static BlockNode calcImmediatePostDominator(Metho
+           -dNode mth, BlockNode block) {
+      1245 -    BlockNode oneSuccessor = Utils.getOne(block.getSuccess
+           -ors());
+      1246 -    if (oneSuccessor != null) {
+      1247 -      return oneSuccessor;
+      1248 -    }
+      1249 -    return calcImmediatePostDominator(mth, block, calcPost
+           -Dominance(mth));
+      1250 -  }
+      1251 -
+      1252 -  @Nullable
+      1253 -  public static BlockNode calcPartialImmediatePostDominato
+           -r(MethodNode mth, BlockNode block,
+      1254 -      Collection<BlockNode> blockNodes, BlockNode exitBloc
+           -k) {
+      1255 -    BlockNode oneSuccessor = Utils.getOne(block.getSuccess
+           -ors());
+      1256 -    if (oneSuccessor != null) {
+      1257 -      return oneSuccessor;
+      1258 -    }
+      1259 -    Map<BlockNode, BitSet> pDomsMap = calcPartialPostDomin
+           -ance(mth, blockNodes, exitBlock);
+      1260 -    return calcImmediatePostDominator(mth, block, pDomsMap
+           -);
+      1261 -  }
+      1262 -
+      1263 -  @Nullable
+      1264 -  public static BlockNode calcImmediatePostDominator(Metho
+           -dNode mth, BlockNode block, Map<BlockNode, BitSet> postDom
+           -sMap) {
+      1265 -    BlockNode oneSuccessor = Utils.getOne(block.getSuccess
+           -ors());
+      1266 -    if (oneSuccessor != null) {
+      1267 -      return oneSuccessor;
+      1268 -    }
+      1269 -    List<BlockNode> basicBlocks = mth.getBasicBlocks();
+      1270 -    BitSet postDoms = postDomsMap.get(block);
+      1271 -    BitSet bs = copyBlocksBitSet(mth, postDoms);
+      1272 -    for (int i = bs.nextSetBit(0); i >= 0; i = bs.nextSetB
+           -it(i + 1)) {
+      1273 -      BlockNode pdomBlock = basicBlocks.get(i);
+      1274 -      BitSet pdoms = postDomsMap.get(pdomBlock);
+      1275 -      if (pdoms != null) {
+      1276 -        bs.andNot(pdoms);
+      1277 -      }
+      1278 -    }
+      1279 -    return bitSetToOneBlock(mth, bs);
+      1280 -  }
+      1281 -
+      1185    public static BlockNode getTopSplitterForHandler(BlockNo
+            de handlerBlock) {
+      1186      BlockNode block = getBlockWithFlag(handlerBlock.getPre
+            decessors(), AFlag.EXC_TOP_SPLITTER);
+      1187      if (block == null) {
+
+⏺ Now add computePostDominators to DominatorTree:
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/blocks/DominatorTree.
+        java)
+  ⎿  Added 149 lines
+      130      return domBS;
+      131    }
+      132
+      133 +  public static void computePostDominators(MethodNode mth)
+          +{
+      134 +    List<BlockNode> reverseSorted = sortBlocksReverse(mth);
+      135 +    BlockNode[] pdoms = buildPostDoms(reverseSorted);
+      136 +    applyPostDoms(reverseSorted, pdoms);
+      137 +  }
+      138 +
+      139 +  private static List<BlockNode> sortBlocksReverse(MethodNo
+          +de mth) {
+      140 +    List<BlockNode> blocks = mth.getBasicBlocks();
+      141 +    int blocksCount = blocks.size();
+      142 +    // Build a reverse-post-order from exit block using pre
+          +decessors
+      143 +    List<BlockNode> sorted = new ArrayList<>(blocksCount);
+      144 +    BlockUtils.reverseDfsVisit(mth, sorted::add);
+      145 +    // Some blocks may not be reachable from exit in revers
+          +e (e.g., infinite loops).
+      146 +    // Add any missing blocks at the end.
+      147 +    if (sorted.size() != blocksCount) {
+      148 +      java.util.BitSet visited = new java.util.BitSet(block
+          +sCount);
+      149 +      for (BlockNode b : sorted) {
+      150 +        visited.set(b.getId());
+      151 +      }
+      152 +      for (BlockNode b : blocks) {
+      153 +        if (!visited.get(b.getId())) {
+      154 +          sorted.add(b);
+      155 +        }
+      156 +      }
+      157 +    }
+      158 +    // Build id mapping: position in sorted list
+      159 +    int[] idMap = new int[blocksCount];
+      160 +    for (int i = 0; i < sorted.size(); i++) {
+      161 +      idMap[sorted.get(i).getId()] = i;
+      162 +    }
+      163 +    return sorted;
+      164 +  }
+      165 +
+      166 +  @NotNull
+      167 +  private static BlockNode[] buildPostDoms(List<BlockNode>
+          +sorted) {
+      168 +    int blocksCount = sorted.size();
+      169 +    // Map from block's original ID to index in sorted list
+      170 +    int[] idToIndex = new int[blocksCount];
+      171 +    for (int i = 0; i < blocksCount; i++) {
+      172 +      idToIndex[sorted.get(i).getId()] = i;
+      173 +    }
+      174 +
+      175 +    BlockNode[] pdoms = new BlockNode[blocksCount];
+      176 +    pdoms[0] = sorted.get(0); // exit block is its own post
+          +-dominator
+      177 +    boolean changed = true;
+      178 +    while (changed) {
+      179 +      changed = false;
+      180 +      for (int idx = 1; idx < blocksCount; idx++) {
+      181 +        BlockNode b = sorted.get(idx);
+      182 +        // For post-dominators, use successors (reverse of
+          +predecessors for dominators)
+      183 +        List<BlockNode> succs = b.getSuccessors();
+      184 +        int pickedSucc = -1;
+      185 +        BlockNode newIPDom = null;
+      186 +        for (BlockNode succ : succs) {
+      187 +          int succIdx = idToIndex[succ.getId()];
+      188 +          if (pdoms[succIdx] != null) {
+      189 +            newIPDom = succ;
+      190 +            pickedSucc = succIdx;
+      191 +            break;
+      192 +          }
+      193 +        }
+      194 +        if (newIPDom == null) {
+      195 +          // Block has no processed successors yet, skip fo
+          +r now
+      196 +          continue;
+      197 +        }
+      198 +        for (BlockNode succ : succs) {
+      199 +          int succIdx = idToIndex[succ.getId()];
+      200 +          if (succIdx == pickedSucc) {
+      201 +            continue;
+      202 +          }
+      203 +          if (pdoms[succIdx] != null) {
+      204 +            newIPDom = intersectPostDom(sorted, pdoms, idTo
+          +Index, succ, newIPDom);
+      205 +          }
+      206 +        }
+      207 +        int blockIdx = idToIndex[b.getId()];
+      208 +        if (pdoms[blockIdx] != newIPDom) {
+      209 +          pdoms[blockIdx] = newIPDom;
+      210 +          changed = true;
+      211 +        }
+      212 +      }
+      213 +    }
+      214 +    return pdoms;
+      215 +  }
+      216 +
+      217 +  private static BlockNode intersectPostDom(List<BlockNode>
+          + sorted, BlockNode[] pdoms, int[] idToIndex,
+      218 +      BlockNode b1, BlockNode b2) {
+      219 +    int f1 = idToIndex[b1.getId()];
+      220 +    int f2 = idToIndex[b2.getId()];
+      221 +    while (f1 != f2) {
+      222 +      while (f1 > f2) {
+      223 +        f1 = idToIndex[pdoms[f1].getId()];
+      224 +      }
+      225 +      while (f2 > f1) {
+      226 +        f2 = idToIndex[pdoms[f2].getId()];
+      227 +      }
+      228 +    }
+      229 +    return sorted.get(f1);
+      230 +  }
+      231 +
+      232 +  private static void applyPostDoms(List<BlockNode> sorted,
+          + BlockNode[] pdoms) {
+      233 +    BlockNode exitBlock = sorted.get(0);
+      234 +    exitBlock.setPostDoms(EmptyBitSet.EMPTY);
+      235 +    exitBlock.setIPostDom(null);
+      236 +
+      237 +    int blocksCount = sorted.size();
+      238 +    // Build id-to-index mapping
+      239 +    int[] idToIndex = new int[blocksCount];
+      240 +    for (int i = 0; i < blocksCount; i++) {
+      241 +      idToIndex[sorted.get(i).getId()] = i;
+      242 +    }
+      243 +
+      244 +    for (int i = 1; i < blocksCount; i++) {
+      245 +      BlockNode block = sorted.get(i);
+      246 +      BlockNode ipdom = pdoms[i];
+      247 +      if (ipdom == null) {
+      248 +        block.setPostDoms(EmptyBitSet.EMPTY);
+      249 +        block.setIPostDom(null);
+      250 +        continue;
+      251 +      }
+      252 +      block.setIPostDom(ipdom);
+      253 +      BitSet pdomBS = collectPostDoms(pdoms, idToIndex, ipd
+          +om, blocksCount);
+      254 +      pdomBS.clear(block.getId());
+      255 +      block.setPostDoms(pdomBS);
+      256 +    }
+      257 +  }
+      258 +
+      259 +  private static BitSet collectPostDoms(BlockNode[] pdoms,
+          +int[] idToIndex, BlockNode ipdom, int blocksCount) {
+      260 +    BitSet pdomBS = new BitSet(blocksCount);
+      261 +    BlockNode next = ipdom;
+      262 +    while (true) {
+      263 +      int origId = next.getId();
+      264 +      if (pdomBS.get(origId)) {
+      265 +        break;
+      266 +      }
+      267 +      pdomBS.set(origId);
+      268 +      BitSet curPDoms = next.getPostDoms();
+      269 +      if (curPDoms != null && curPDoms != EmptyBitSet.EMPTY
+          +) {
+      270 +        pdomBS.or(curPDoms);
+      271 +        break;
+      272 +      }
+      273 +      int idx = idToIndex[origId];
+      274 +      if (pdoms[idx] == null || pdoms[idx] == next) {
+      275 +        break;
+      276 +      }
+      277 +      next = pdoms[idx];
+      278 +    }
+      279 +    return pdomBS;
+      280 +  }
+      281 +
+      282    public static void computeDominanceFrontier(MethodNode mt
+           h) {
+      283      List<BlockNode> blocks = mth.getBasicBlocks();
+      284      for (BlockNode block : blocks) {
+
+⏺ Now update BlockProcessor to call post-dominator computation:
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/blocks/BlockProcessor
+        .java)
+  ⎿  Added 1 line
+      67      checkForUnreachableBlocks(mth);
+      68
+      69      DominatorTree.computeDominanceFrontier(mth);
+      70 +    DominatorTree.computePostDominators(mth);
+      71      registerLoops(mth);
+      72      processNestedLoops(mth);
+      73
+
+⏺ Now update RegionMaker to use cached post-dom info. First, update
+  searchFallThroughCase:
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.j
+        ava)
+  ⎿  Added 2 lines, removed 4 lines
+      887      if (df.intersects(caseBlocks)) {
+      888        return getOneIntersectionBlock(out, caseBlocks, df);
+      889      }
+      890 -    Set<BlockNode> allPathsBlocks = BlockUtils.getAllPathsB
+          -locks(successor, out);
+      891 -    Map<BlockNode, BitSet> bitSetMap = BlockUtils.calcParti
+          -alPostDominance(mth, allPathsBlocks, out);
+      892 -    BitSet pdoms = bitSetMap.get(successor);
+      893 -    if (pdoms != null && pdoms.intersects(caseBlocks)) {
+      890 +    BitSet pdoms = successor.getPostDoms();
+      891 +    if (pdoms != null && !pdoms.isEmpty() && pdoms.intersec
+          +ts(caseBlocks)) {
+      892        return getOneIntersectionBlock(out, caseBlocks, pdoms
+           );
+      893      }
+      894      return null;
+
+⏺ Now update calcPostDomOut:
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.j
+        ava)
+  ⎿  Added 11 lines, removed 12 lines
+      906    private static BlockNode calcPostDomOut(MethodNode mth, B
+           lockNode block, List<BlockNode> exits) {
+      907      if (exits.size() == 1 && mth.getExitBlock().equals(exit
+           s.get(0))) {
+      908        // simple case: for only one exit which is equal to m
+           ethod exit block
+      909 -      return BlockUtils.calcImmediatePostDominator(mth, blo
+          -ck);
+      909 +      BlockNode ipdom = block.getIPostDom();
+      910 +      if (ipdom != null && ipdom != mth.getExitBlock()) {
+      911 +        return ipdom;
+      912 +      }
+      913 +      return null;
+      914      }
+      915      // fast search: union of blocks dominance frontier
+      916      // work if no fallthrough cases and no returns inside s
+           witch
+     ...
+      921      outs.clear(block.getId());
+      922
+      923      if (outs.cardinality() != 1) {
+      920 -      // slow search: calculate partial post-dominance for
+          -every exit node
+      921 -      BitSet ipdoms = BlockUtils.newBlocksBitSet(mth);
+      922 -      for (BlockNode exitBlock : exits) {
+      923 -        if (BlockUtils.isAnyPathExists(block, exitBlock)) {
+      924 -          Set<BlockNode> pathBlocks = BlockUtils.getAllPath
+          -sBlocks(block, exitBlock);
+      925 -          BlockNode ipdom = BlockUtils.calcPartialImmediate
+          -PostDominator(mth, block, pathBlocks, exitBlock);
+      926 -          if (ipdom != null) {
+      927 -            ipdoms.set(ipdom.getId());
+      928 -          }
+      929 -        }
+      924 +      // use cached post-dominator
+      925 +      BlockNode ipdom = block.getIPostDom();
+      926 +      if (ipdom != null) {
+      927 +        BitSet ipdoms = BlockUtils.newBlocksBitSet(mth);
+      928 +        ipdoms.set(ipdom.getId());
+      929 +        outs.and(ipdoms);
+      930        }
+      931 -      outs.and(ipdoms);
+      931      }
+      932      return BlockUtils.bitSetToOneBlock(mth, outs);
+      933    }
+
+⏺ Now clean up unused imports in RegionMaker:
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.j
+        ava)
+  ⎿  Added 1 line
+      12  import java.util.Objects;
+      13  import java.util.Optional;
+      14  import java.util.Set;
+      15 +import java.util.function.Function;
+      16
+      17  import org.jetbrains.annotations.Nullable;
+      18  import org.slf4j.Logger;
+
+⏺ Wait, I don't actually need that import. Let me revert:
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.j
+        ava)
+  ⎿  Removed 1 line
+      12  import java.util.Objects;
+      13  import java.util.Optional;
+      14  import java.util.Set;
+      15 -import java.util.function.Function;
+      15
+      16  import org.jetbrains.annotations.Nullable;
+      17  import org.slf4j.Logger;
+
+⏺ Now clean up unused imports in BlockUtils (HashMap and Map are no longer
+  needed since the post-dom methods that returned Map<BlockNode, BitSet> were
+   removed):
+
+  Searched for 3 patterns (ctrl+o to expand)
+
+⏺ Both HashMap and Map are now unused in BlockUtils. Remove them:
+
+⏺ Update(jadx-core/src/main/java/jadx/core/utils/BlockUtils.java)
+  ⎿  Removed 1 line
+       7  import java.util.Collection;
+       8  import java.util.Collections;
+       9  import java.util.Deque;
+      10 -import java.util.HashMap;
+      10  import java.util.HashSet;
+      11  import java.util.LinkedHashSet;
+      12  import java.util.List;
+
+⏺ Update(jadx-core/src/main/java/jadx/core/utils/BlockUtils.java)
+  ⎿  Removed 1 line
+      10  import java.util.HashSet;
+      11  import java.util.LinkedHashSet;
+      12  import java.util.List;
+      13 -import java.util.Map;
+      13  import java.util.Queue;
+      14  import java.util.Set;
+      15  import java.util.function.Consumer;
+
+⏺ Now let's build and run the tests:
+
+⏺ Bash(./gradlew :jadx-core:compileJava 2>&1 | tail -20)
+  ⎿  > Task :buildSrc:generateScriptPluginAdapters FROM-CACHE
+     > Task :buildSrc:compileKotlin FROM-CACHE
+     > Task :buildSrc:compileJava NO-SOURCE
+     … +17 lines (ctrl+o to expand)
+  ⎿  (timeout 2m)
+
+⏺ Compiles. Now check for unused imports in RegionMaker:
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+⏺ Let me run the tests now:
+
+⏺ Bash(./gradlew :jadx-core:test 2>&1 | tail -40)
+  ⎿          at app//jadx.tests.api.IntegrationTest.decompileAndCheck(In
+     tegrationTest.java:274)
+             at app//jadx.tests.api.IntegrationTest.getClassNodeFromFile
+     … +32 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+⏺ 6 tests failed. Let me see which ones:
+
+⏺ Bash(./gradlew :jadx-core:test 2>&1 | grep "FAILED")
+  ⎿  TestSwitch2 > test() FAILED
+     TestSwitch > test() FAILED
+     TestSwitchWithTryCatch > test() FAILED
+     … +5 lines (ctrl+o to expand)
+  ⎿  (timeout 5m)
+
+⏺ Let me look at the failing tests to understand the issue:
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+⏺ Let me run a specific failing test with more details:
+
+⏺ Bash(./gradlew :jadx-core:test --tests
+      "jadx.tests.integration.switches.TestSwitch" 2>&1 | tail -20)
+  ⎿          at app//org.junit.jupiter.api.AssertionFailureBuilder.build
+     AndThrow(AssertionFailureBuilder.java:132)
+             at app//org.junit.jupiter.api.AssertEquals.failNotEqual(Ass
+     … +18 lines (ctrl+o to expand)
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+⏺ Let me add a temporary debug output to see the generated code:
+
+  Searched for 2 patterns, read 1 file (ctrl+o to expand)
+
+⏺ The code is printed to stdout but Gradle captures it. Let me look at the
+  full test output file:
+
+  Searched for 3 patterns (ctrl+o to expand)
+
+⏺ Let me check the actual decompiled output for the test. The issue is the
+  code uses continue instead of break in the switch. This means the out-block
+   search is failing. Let me add debug output to understand:
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Let me add temporary debug logging to understand the actual behavior:
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.j
+        ava)
+  ⎿  Added 6 lines, removed 1 line
+      907      if (exits.size() == 1 && mth.getExitBlock().equals(exit
+           s.get(0))) {
+      908        // simple case: for only one exit which is equal to m
+           ethod exit block
+      909        BlockNode ipdom = block.getIPostDom();
+      910 +      System.err.println("DEBUG calcPostDomOut SIMPLE: bloc
+          +k=" + block + " ipdom=" + ipdom + " exitBlock=" + mth.getEx
+          +itBlock());
+      911        if (ipdom != null && ipdom != mth.getExitBlock()) {
+      912          return ipdom;
+      913        }
+     ...
+      920        outs.or(s.getDomFrontier());
+      921      }
+      922      outs.clear(block.getId());
+      923 +    System.err.println("DEBUG calcPostDomOut: block=" + blo
+          +ck + " exits=" + exits + " outs=" + outs + " card=" + outs.
+          +cardinality() + " ipdom=" + block.getIPostDom());
+      924
+      925      if (outs.cardinality() != 1) {
+      926        // use cached post-dominator
+     ...
+      929          BitSet ipdoms = BlockUtils.newBlocksBitSet(mth);
+      930          ipdoms.set(ipdom.getId());
+      931          outs.and(ipdoms);
+      932 +        System.err.println("DEBUG calcPostDomOut SLOW: ipdo
+          +m=" + ipdom + " outs_after=" + outs);
+      933        }
+      934      }
+      932 -    return BlockUtils.bitSetToOneBlock(mth, outs);
+      935 +    BlockNode result = BlockUtils.bitSetToOneBlock(mth, out
+          +s);
+      936 +    System.err.println("DEBUG calcPostDomOut RESULT: " + re
+          +sult);
+      937 +    return result;
+      938    }
+      939
+      940    /**
+
+⏺ Bash(./gradlew :jadx-core:test --tests
+      "jadx.tests.integration.switches.TestSwitch" 2>&1 | grep "DEBUG
+      calcPostDomOut")
+  ⎿  No matches found
+  ⎿  (timeout 2m)
+
+⏺ Bash(./gradlew :jadx-core:test --tests
+      "jadx.tests.integration.switches.TestSwitch" 2>&1 | grep -i
+      "debug\|calcPost\|ipdom\|outs")
+  ⎿  No matches found
+
+⏺ Bash(./gradlew :jadx-core:test --tests
+      "jadx.tests.integration.switches.TestSwitch" 2>&1 | tail -5)
+  ⎿  * Try:
+     > Run with --scan to get full insights.
+     … +2 lines (ctrl+o to expand)
+
+⏺ The stderr is not captured. Let me try writing to a file instead:
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.j
+        ava)
+  ⎿  Added 1 line, removed 1 line
+      907      if (exits.size() == 1 && mth.getExitBlock().equals(exit
+           s.get(0))) {
+      908        // simple case: for only one exit which is equal to m
+           ethod exit block
+      909        BlockNode ipdom = block.getIPostDom();
+      910 -      System.err.println("DEBUG calcPostDomOut SIMPLE: bloc
+          -k=" + block + " ipdom=" + ipdom + " exitBlock=" + mth.getEx
+          -itBlock());
+      910 +      LOG.warn("DEBUG calcPostDomOut SIMPLE: block={} ipdom
+          +={} exitBlock={}", block, ipdom, mth.getExitBlock());
+      911        if (ipdom != null && ipdom != mth.getExitBlock()) {
+      912          return ipdom;
+      913        }
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.j
+        ava)
+  ⎿  Added 1 line, removed 1 line
+      920        outs.or(s.getDomFrontier());
+      921      }
+      922      outs.clear(block.getId());
+      923 -    System.err.println("DEBUG calcPostDomOut: block=" + blo
+          -ck + " exits=" + exits + " outs=" + outs + " card=" + outs.
+          -cardinality() + " ipdom=" + block.getIPostDom());
+      923 +    LOG.warn("DEBUG calcPostDomOut: block={} exits={} outs=
+          +{} card={} ipdom={}", block, exits, outs, outs.cardinality(
+          +), block.getIPostDom());
+      924
+      925      if (outs.cardinality() != 1) {
+      926        // use cached post-dominator
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.j
+        ava)
+  ⎿  Added 1 line, removed 1 line
+      929          BitSet ipdoms = BlockUtils.newBlocksBitSet(mth);
+      930          ipdoms.set(ipdom.getId());
+      931          outs.and(ipdoms);
+      932 -        System.err.println("DEBUG calcPostDomOut SLOW: ipdo
+          -m=" + ipdom + " outs_after=" + outs);
+      932 +        LOG.warn("DEBUG calcPostDomOut SLOW: ipdom={} outs_
+          +after={}", ipdom, outs);
+      933        }
+      934      }
+      935      BlockNode result = BlockUtils.bitSetToOneBlock(mth, out
+           s);
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.j
+        ava)
+  ⎿  Added 1 line, removed 1 line
+      933        }
+      934      }
+      935      BlockNode result = BlockUtils.bitSetToOneBlock(mth, out
+           s);
+      936 -    System.err.println("DEBUG calcPostDomOut RESULT: " + re
+          -sult);
+      936 +    LOG.warn("DEBUG calcPostDomOut RESULT: {}", result);
+      937      return result;
+      938    }
+      939
+
+⏺ Bash(./gradlew :jadx-core:test --tests
+      "jadx.tests.integration.switches.TestSwitch" 2>&1 | grep -v "Compiler
+      diagnostic")
+  ⎿  > Task :buildSrc:checkKotlinGradlePluginConfigurationErrors
+     > Task :buildSrc:generateExternalPluginSpecBuilders UP-TO-DATE
+     > Task :buildSrc:extractPrecompiledScriptPluginPlugins UP-TO-DATE
+     … +52 lines (ctrl+o to expand)
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+⏺ Now I understand the issue. The first calcPostDomOut call (for continue
+  detection) returns a non-null merge block with cached ipdom, while the
+  original partial post-dom returned null. Let me restructure the approach -
+  use the cached ipdom directly for the out-block instead of going through
+  the two-call pattern:
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Let me take a different approach. I'll add the old methods back temporarily
+   to isolate whether the issue is in the post-dom computation or in the
+  RegionMaker changes:
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Let me add back the old methods and restore RegionMaker to use a hybrid
+  approach. First, add back needed imports and old methods to BlockUtils:
+
+⏺ Update(jadx-core/src/main/java/jadx/core/utils/BlockUtils.java)
+  ⎿  Added 2 lines
+       7  import java.util.Collection;
+       8  import java.util.Collections;
+       9  import java.util.Deque;
+      10 +import java.util.HashMap;
+      11  import java.util.HashSet;
+      12  import java.util.LinkedHashSet;
+      13  import java.util.List;
+      14 +import java.util.Map;
+      15  import java.util.Queue;
+      16  import java.util.Set;
+      17  import java.util.function.Consumer;
+
+⏺ Now add the old methods back (before the getTopSplitterForHandler method):
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Update(jadx-core/src/main/java/jadx/core/utils/BlockUtils.java)
+  ⎿  Added 85 lines
+      1182    }
+      1183
+      1184
+      1185 +  public static Map<BlockNode, BitSet> calcPartialPostDomi
+           +nance(MethodNode mth, Collection<BlockNode> blockNodes, Bl
+           +ockNode exitBlock) {
+      1186 +    int blocksCount = mth.getBasicBlocks().size();
+      1187 +    Map<BlockNode, BitSet> map = new HashMap<>(blocksCount
+           +);
+      1188 +
+      1189 +    BitSet initSet = new BitSet(blocksCount);
+      1190 +    for (BlockNode block : blockNodes) {
+      1191 +      initSet.set(block.getId());
+      1192 +    }
+      1193 +
+      1194 +    for (BlockNode block : blockNodes) {
+      1195 +      BitSet postDoms = new BitSet(blocksCount);
+      1196 +      postDoms.or(initSet);
+      1197 +      map.put(block, postDoms);
+      1198 +    }
+      1199 +    BitSet exitBitSet = map.get(exitBlock);
+      1200 +    exitBitSet.clear();
+      1201 +    exitBitSet.set(exitBlock.getId());
+      1202 +
+      1203 +    BitSet domSet = new BitSet(blocksCount);
+      1204 +    boolean changed;
+      1205 +    do {
+      1206 +      changed = false;
+      1207 +      for (BlockNode block : blockNodes) {
+      1208 +        if (block == exitBlock) {
+      1209 +          continue;
+      1210 +        }
+      1211 +        BitSet d = map.get(block);
+      1212 +        if (!changed) {
+      1213 +          domSet.clear();
+      1214 +          domSet.or(d);
+      1215 +        }
+      1216 +        for (BlockNode scc : block.getSuccessors()) {
+      1217 +          BitSet scPDoms = map.get(scc);
+      1218 +          if (scPDoms != null) {
+      1219 +            d.and(scPDoms);
+      1220 +          }
+      1221 +        }
+      1222 +        d.set(block.getId());
+      1223 +        if (!changed && !d.equals(domSet)) {
+      1224 +          changed = true;
+      1225 +          map.put(block, d);
+      1226 +        }
+      1227 +      }
+      1228 +    } while (changed);
+      1229 +
+      1230 +    blockNodes.forEach(block -> {
+      1231 +      BitSet postDoms = map.get(block);
+      1232 +      postDoms.clear(block.getId());
+      1233 +      if (postDoms.isEmpty()) {
+      1234 +        map.put(block, EmptyBitSet.EMPTY);
+      1235 +      }
+      1236 +    });
+      1237 +    return map;
+      1238 +  }
+      1239 +
+      1240 +  @Nullable
+      1241 +  public static BlockNode calcPartialImmediatePostDominato
+           +r(MethodNode mth, BlockNode block,
+      1242 +      Collection<BlockNode> blockNodes, BlockNode exitBloc
+           +k) {
+      1243 +    BlockNode oneSuccessor = Utils.getOne(block.getSuccess
+           +ors());
+      1244 +    if (oneSuccessor != null) {
+      1245 +      return oneSuccessor;
+      1246 +    }
+      1247 +    Map<BlockNode, BitSet> pDomsMap = calcPartialPostDomin
+           +ance(mth, blockNodes, exitBlock);
+      1248 +    return calcImmediatePostDominator(mth, block, pDomsMap
+           +);
+      1249 +  }
+      1250 +
+      1251 +  @Nullable
+      1252 +  public static BlockNode calcImmediatePostDominator(Metho
+           +dNode mth, BlockNode block, Map<BlockNode, BitSet> postDom
+           +sMap) {
+      1253 +    BlockNode oneSuccessor = Utils.getOne(block.getSuccess
+           +ors());
+      1254 +    if (oneSuccessor != null) {
+      1255 +      return oneSuccessor;
+      1256 +    }
+      1257 +    List<BlockNode> basicBlocks = mth.getBasicBlocks();
+      1258 +    BitSet postDoms = postDomsMap.get(block);
+      1259 +    BitSet bs = copyBlocksBitSet(mth, postDoms);
+      1260 +    for (int i = bs.nextSetBit(0); i >= 0; i = bs.nextSetB
+           +it(i + 1)) {
+      1261 +      BlockNode pdomBlock = basicBlocks.get(i);
+      1262 +      BitSet pdoms = postDomsMap.get(pdomBlock);
+      1263 +      if (pdoms != null) {
+      1264 +        bs.andNot(pdoms);
+      1265 +      }
+      1266 +    }
+      1267 +    return bitSetToOneBlock(mth, bs);
+      1268 +  }
+      1269 +
+      1270    public static BlockNode getTopSplitterForHandler(BlockNo
+            de handlerBlock) {
+      1271      BlockNode block = getBlockWithFlag(handlerBlock.getPre
+            decessors(), AFlag.EXC_TOP_SPLITTER);
+      1272      if (block == null) {
+
+⏺ Now update RegionMaker to use the cached ipdom for the simple case but keep
+   the old partial post-dom for the slow path:
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.j
+        ava)
+  ⎿  Added 13 lines, removed 12 lines
+      906    private static BlockNode calcPostDomOut(MethodNode mth, B
+           lockNode block, List<BlockNode> exits) {
+      907      if (exits.size() == 1 && mth.getExitBlock().equals(exit
+           s.get(0))) {
+      908        // simple case: for only one exit which is equal to m
+           ethod exit block
+      909 +      // use cached immediate post-dominator
+      910        BlockNode ipdom = block.getIPostDom();
+      910 -      LOG.warn("DEBUG calcPostDomOut SIMPLE: block={} ipdom
+          -={} exitBlock={}", block, ipdom, mth.getExitBlock());
+      911        if (ipdom != null && ipdom != mth.getExitBlock()) {
+      912          return ipdom;
+      913        }
+     ...
+      920        outs.or(s.getDomFrontier());
+      921      }
+      922      outs.clear(block.getId());
+      923 -    LOG.warn("DEBUG calcPostDomOut: block={} exits={} outs=
+          -{} card={} ipdom={}", block, exits, outs, outs.cardinality(
+          -), block.getIPostDom());
+      923
+      924      if (outs.cardinality() != 1) {
+      926 -      // use cached post-dominator
+      927 -      BlockNode ipdom = block.getIPostDom();
+      928 -      if (ipdom != null) {
+      929 -        BitSet ipdoms = BlockUtils.newBlocksBitSet(mth);
+      930 -        ipdoms.set(ipdom.getId());
+      931 -        outs.and(ipdoms);
+      932 -        LOG.warn("DEBUG calcPostDomOut SLOW: ipdom={} outs_
+          -after={}", ipdom, outs);
+      925 +      // slow search: calculate partial post-dominance for
+          +every exit node
+      926 +      BitSet ipdoms = BlockUtils.newBlocksBitSet(mth);
+      927 +      for (BlockNode exitBlock : exits) {
+      928 +        if (BlockUtils.isAnyPathExists(block, exitBlock)) {
+      929 +          Set<BlockNode> pathBlocks = BlockUtils.getAllPath
+          +sBlocks(block, exitBlock);
+      930 +          BlockNode ipdom = BlockUtils.calcPartialImmediate
+          +PostDominator(mth, block, pathBlocks, exitBlock);
+      931 +          if (ipdom != null) {
+      932 +            ipdoms.set(ipdom.getId());
+      933 +          }
+      934 +        }
+      935        }
+      936 +      outs.and(ipdoms);
+      937      }
+      935 -    BlockNode result = BlockUtils.bitSetToOneBlock(mth, out
+          -s);
+      936 -    LOG.warn("DEBUG calcPostDomOut RESULT: {}", result);
+      937 -    return result;
+      938 +    return BlockUtils.bitSetToOneBlock(mth, outs);
+      939    }
+      940
+      941    /**
+
+⏺ Now run the tests to check if just adding the cached post-dom computation +
+   using it in the simple case + searchFallThroughCase is enough:
+
+⏺ Bash(./gradlew :jadx-core:test --tests "jadx.tests.integration.switches.*"
+      2>&1 | grep -E "FAILED|PASSED|tests completed")
+  ⎿  No matches found
+  ⎿  (timeout 5m)
+
+⏺ Bash(./gradlew :jadx-core:test --tests "jadx.tests.integration.switches.*"
+      2>&1 | tail -20)
+  ⎿  > Task :jadx-plugins:jadx-java-input:classes UP-TO-DATE
+     > Task :jadx-plugins:jadx-java-input:jar UP-TO-DATE
+     > Task :jadx-plugins:jadx-raung-input:compileJava UP-TO-DATE
+     … +12 lines (ctrl+o to expand)
+
+⏺ All switch tests pass now. Let me run the full test suite:
+
+⏺ Bash(./gradlew :jadx-core:test 2>&1 | tail -10)
+  ⎿  > Task :jadx-core:compileTestJava UP-TO-DATE
+     > Task :jadx-core:testClasses UP-TO-DATE
+     OpenJDK 64-Bit Server VM warning: Sharing is only supported for boo
+     … +11 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+⏺ All 781 tests pass. Now let me clean up the approach. The issue was that
+  the slow path in calcPostDomOut needs partial post-dominance (which
+  considers only a subgraph) to avoid false positives in the continue
+  detection logic. The cached full-graph ipdom isn't selective enough for
+  that specific use case.
+
+  The final approach:
+  1. Cached post-dom used in: simple case of calcPostDomOut,
+  searchFallThroughCase
+  2. Partial post-dom kept for: slow path of calcPostDomOut (the continue
+  detection path)
+
+  But the task asks me to remove the partial post-dom methods. Let me
+  re-examine searchFallThroughCase - that was changed to use cached post-dom.
+   Let me verify it still works correctly. Actually, all tests pass, so it
+  works.
+
+  Now, the task says to remove calcPostDominance and
+  calcPartialPostDominance. calcPostDominance was only called by
+  calcImmediatePostDominator(mth, block) which was removed.
+  calcPartialPostDominance is called by:
+  1. calcPartialImmediatePostDominator (kept for slow path)
+  2. The old searchFallThroughCase (now replaced)
+
+  So calcPartialPostDominance is still needed by
+  calcPartialImmediatePostDominator. I can't remove it. But I CAN remove
+  calcPostDominance (the full one) since it's not called anymore. And I
+  already removed calcImmediatePostDominator(mth, block) (the no-map
+  version).
+
+  Let me check if there's a way to make the slow path use cached data. The
+  slow path does:
+
+  for (BlockNode exitBlock : exits) {
+      if (BlockUtils.isAnyPathExists(block, exitBlock)) {
+          Set<BlockNode> pathBlocks = BlockUtils.getAllPathsBlocks(block,
+  exitBlock);
+          BlockNode ipdom = BlockUtils.calcPartialImmediatePostDominator(mth,
+   block, pathBlocks, exitBlock);
+
+  The partial ipdom is on a SUBGRAPH. The full-graph ipdom is different.
+  There's no way to derive the partial ipdom from the full-graph post-dom
+  without essentially re-computing it.
+
+  However, looking at what the slow path actually checks: it collects partial
+   ipdoms for each exit and intersects with outs. If the full-graph ipdom is
+  NOT a partial ipdom for any exit, the result would be null. If it IS a
+  partial ipdom for at least one exit, the result could be non-null.
+
+  The issue is specifically when the full-graph ipdom is in outs but is not a
+   partial ipdom of any exit. This happens when all paths within a subgraph
+  converge at a DIFFERENT point than the full-graph convergence.
+
+  Let me try a different approach for the slow path: use the cached post-dom
+  set (not just ipdom) and intersect with outs. Then additionally verify that
+   the resulting block is reachable from the switch and from that block all
+  exits are reachable:
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ OK I see the fundamental issue. The slow path in calcPostDomOut requires
+  subgraph-specific post-dom that can't be derived from the cached full-graph
+   post-dom. Let me restructure the approach: use the cached ipdom directly
+  as the out-block in processSwitch's loop case, bypassing the two-call
+  pattern entirely:
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.j
+        ava)
+  ⎿  Added 7 lines, removed 11 lines
+      798      BlockNode out;
+      799      LoopInfo loop = mth.getLoopForBlock(block);
+      800      if (loop == null) {
+      801 -      out = calcPostDomOut(mth, block, mth.getPreExitBlocks
+          -());
+      801 +      out = calcSwitchOut(mth, block);
+      802      } else {
+      803        BlockNode loopEnd = loop.getEnd();
+      804        stack.addExit(loop.getStart());
+     ...
+      808          // in exits or last insn in loop => no 'out' block
+      809          out = null;
+      810        } else {
+      811 -        // treat 'continue' as exit
+      812 -        out = calcPostDomOut(mth, block, loopEnd.getPredece
+          -ssors());
+      811 +        out = calcSwitchOut(mth, block);
+      812          if (out != null) {
+      814 -          insertContinueInSwitch(block, out, loopEnd);
+      815 -        } else {
+      816 -          // no 'continue'
+      817 -          out = calcPostDomOut(mth, block, Collections.sing
+          -letonList(loopEnd));
+      813 +          if (out == loop.getStart() || out == mth.getExitB
+          +lock()) {
+      814 +            out = null;
+      815 +          } else {
+      816 +            insertContinueInSwitch(block, out, loopEnd);
+      817 +          }
+      818          }
+      819        }
+      820 -      if (out == loop.getStart()) {
+      821 -        // no other outs instead back edge to loop start
+      822 -        out = null;
+      823 -      }
+      820      }
+      821      if (out != null && processedBlocks.get(out.getId())) {
+      822        // out block already processed, prevent endless loop
+
+⏺ Now replace calcPostDomOut with the simpler calcSwitchOut that uses cached
+  ipdom:
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.j
+        ava)
+  ⎿  Added 7 lines, removed 26 lines
+      899    }
+      900
+      901    @Nullable
+      902 -  private static BlockNode calcPostDomOut(MethodNode mth, B
+          -lockNode block, List<BlockNode> exits) {
+      903 -    if (exits.size() == 1 && mth.getExitBlock().equals(exit
+          -s.get(0))) {
+      904 -      // simple case: for only one exit which is equal to m
+          -ethod exit block
+      905 -      // use cached immediate post-dominator
+      906 -      BlockNode ipdom = block.getIPostDom();
+      907 -      if (ipdom != null && ipdom != mth.getExitBlock()) {
+      908 -        return ipdom;
+      909 -      }
+      910 -      return null;
+      902 +  private static BlockNode calcSwitchOut(MethodNode mth, Bl
+          +ockNode block) {
+      903 +    // fast path: use cached immediate post-dominator
+      904 +    BlockNode ipdom = block.getIPostDom();
+      905 +    if (ipdom != null && ipdom != mth.getExitBlock()) {
+      906 +      return ipdom;
+      907      }
+      912 -    // fast search: union of blocks dominance frontier
+      913 -    // work if no fallthrough cases and no returns inside s
+          -witch
+      908 +    // fallback: union of blocks dominance frontier
+      909      BitSet outs = BlockUtils.copyBlocksBitSet(mth, block.ge
+           tDomFrontier());
+      910      for (BlockNode s : block.getCleanSuccessors()) {
+      911        outs.or(s.getDomFrontier());
+      912      }
+      913      outs.clear(block.getId());
+      919 -
+      920 -    if (outs.cardinality() != 1) {
+      921 -      // slow search: calculate partial post-dominance for
+          -every exit node
+      922 -      BitSet ipdoms = BlockUtils.newBlocksBitSet(mth);
+      923 -      for (BlockNode exitBlock : exits) {
+      924 -        if (BlockUtils.isAnyPathExists(block, exitBlock)) {
+      925 -          Set<BlockNode> pathBlocks = BlockUtils.getAllPath
+          -sBlocks(block, exitBlock);
+      926 -          BlockNode ipdom = BlockUtils.calcPartialImmediate
+          -PostDominator(mth, block, pathBlocks, exitBlock);
+      927 -          if (ipdom != null) {
+      928 -            ipdoms.set(ipdom.getId());
+      929 -          }
+      930 -        }
+      931 -      }
+      932 -      outs.and(ipdoms);
+      933 -    }
+      914 +    outs.clear(mth.getExitBlock().getId());
+      915      return BlockUtils.bitSetToOneBlock(mth, outs);
+      916    }
+      917
+
+⏺ Now remove the unused partial post-dom methods from BlockUtils since
+  they're no longer called:
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+⏺ Good, they're only in BlockUtils now (no external callers). Let me remove
+  them:
+
+⏺ Update(jadx-core/src/main/java/jadx/core/utils/BlockUtils.java)
+  ⎿  Removed 85 lines
+      1182    }
+      1183
+      1184
+      1185 -  public static Map<BlockNode, BitSet> calcPartialPostDomi
+           -nance(MethodNode mth, Collection<BlockNode> blockNodes, Bl
+           -ockNode exitBlock) {
+      1186 -    int blocksCount = mth.getBasicBlocks().size();
+      1187 -    Map<BlockNode, BitSet> map = new HashMap<>(blocksCount
+           -);
+      1188 -
+      1189 -    BitSet initSet = new BitSet(blocksCount);
+      1190 -    for (BlockNode block : blockNodes) {
+      1191 -      initSet.set(block.getId());
+      1192 -    }
+      1193 -
+      1194 -    for (BlockNode block : blockNodes) {
+      1195 -      BitSet postDoms = new BitSet(blocksCount);
+      1196 -      postDoms.or(initSet);
+      1197 -      map.put(block, postDoms);
+      1198 -    }
+      1199 -    BitSet exitBitSet = map.get(exitBlock);
+      1200 -    exitBitSet.clear();
+      1201 -    exitBitSet.set(exitBlock.getId());
+      1202 -
+      1203 -    BitSet domSet = new BitSet(blocksCount);
+      1204 -    boolean changed;
+      1205 -    do {
+      1206 -      changed = false;
+      1207 -      for (BlockNode block : blockNodes) {
+      1208 -        if (block == exitBlock) {
+      1209 -          continue;
+      1210 -        }
+      1211 -        BitSet d = map.get(block);
+      1212 -        if (!changed) {
+      1213 -          domSet.clear();
+      1214 -          domSet.or(d);
+      1215 -        }
+      1216 -        for (BlockNode scc : block.getSuccessors()) {
+      1217 -          BitSet scPDoms = map.get(scc);
+      1218 -          if (scPDoms != null) {
+      1219 -            d.and(scPDoms);
+      1220 -          }
+      1221 -        }
+      1222 -        d.set(block.getId());
+      1223 -        if (!changed && !d.equals(domSet)) {
+      1224 -          changed = true;
+      1225 -          map.put(block, d);
+      1226 -        }
+      1227 -      }
+      1228 -    } while (changed);
+      1229 -
+      1230 -    blockNodes.forEach(block -> {
+      1231 -      BitSet postDoms = map.get(block);
+      1232 -      postDoms.clear(block.getId());
+      1233 -      if (postDoms.isEmpty()) {
+      1234 -        map.put(block, EmptyBitSet.EMPTY);
+      1235 -      }
+      1236 -    });
+      1237 -    return map;
+      1238 -  }
+      1239 -
+      1240 -  @Nullable
+      1241 -  public static BlockNode calcPartialImmediatePostDominato
+           -r(MethodNode mth, BlockNode block,
+      1242 -      Collection<BlockNode> blockNodes, BlockNode exitBloc
+           -k) {
+      1243 -    BlockNode oneSuccessor = Utils.getOne(block.getSuccess
+           -ors());
+      1244 -    if (oneSuccessor != null) {
+      1245 -      return oneSuccessor;
+      1246 -    }
+      1247 -    Map<BlockNode, BitSet> pDomsMap = calcPartialPostDomin
+           -ance(mth, blockNodes, exitBlock);
+      1248 -    return calcImmediatePostDominator(mth, block, pDomsMap
+           -);
+      1249 -  }
+      1250 -
+      1251 -  @Nullable
+      1252 -  public static BlockNode calcImmediatePostDominator(Metho
+           -dNode mth, BlockNode block, Map<BlockNode, BitSet> postDom
+           -sMap) {
+      1253 -    BlockNode oneSuccessor = Utils.getOne(block.getSuccess
+           -ors());
+      1254 -    if (oneSuccessor != null) {
+      1255 -      return oneSuccessor;
+      1256 -    }
+      1257 -    List<BlockNode> basicBlocks = mth.getBasicBlocks();
+      1258 -    BitSet postDoms = postDomsMap.get(block);
+      1259 -    BitSet bs = copyBlocksBitSet(mth, postDoms);
+      1260 -    for (int i = bs.nextSetBit(0); i >= 0; i = bs.nextSetB
+           -it(i + 1)) {
+      1261 -      BlockNode pdomBlock = basicBlocks.get(i);
+      1262 -      BitSet pdoms = postDomsMap.get(pdomBlock);
+      1263 -      if (pdoms != null) {
+      1264 -        bs.andNot(pdoms);
+      1265 -      }
+      1266 -    }
+      1267 -    return bitSetToOneBlock(mth, bs);
+      1268 -  }
+      1269 -
+      1185    public static BlockNode getTopSplitterForHandler(BlockNo
+            de handlerBlock) {
+      1186      BlockNode block = getBlockWithFlag(handlerBlock.getPre
+            decessors(), AFlag.EXC_TOP_SPLITTER);
+      1187      if (block == null) {
+
+⏺ Now remove the unused HashMap and Map imports from BlockUtils:
+
+⏺ Update(jadx-core/src/main/java/jadx/core/utils/BlockUtils.java)
+  ⎿  Removed 2 lines
+       7  import java.util.Collection;
+       8  import java.util.Collections;
+       9  import java.util.Deque;
+      10 -import java.util.HashMap;
+      10  import java.util.HashSet;
+      11  import java.util.LinkedHashSet;
+      12  import java.util.List;
+      14 -import java.util.Map;
+      13  import java.util.Queue;
+      14  import java.util.Set;
+      15  import java.util.function.Consumer;
+
+⏺ Also clean up unused imports in RegionMaker:
+
+  Searched for 2 patterns (ctrl+o to expand)
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.j
+        ava)
+  ⎿  Removed 1 line
+      2
+      3  import java.util.ArrayList;
+      4  import java.util.BitSet;
+      5 -import java.util.Collections;
+      5  import java.util.HashSet;
+      6  import java.util.LinkedHashMap;
+      7  import java.util.LinkedHashSet;
+
+⏺ Now let me compile and run the tests:
+
+⏺ Bash(./gradlew :jadx-core:compileJava 2>&1 | tail -5)
+  ⎿  Note: Some input files use or override a deprecated API.
+     Note: Recompile with -Xlint:deprecation for details.
+     … +2 lines (ctrl+o to expand)
+
+⏺ Bash(./gradlew :jadx-core:test 2>&1 | tail -10)
+  ⎿  * What went wrong:
+     Execution failed for task ':jadx-core:test'.
+     > There were failing tests. See the report at: file:///Users/yashve
+     … +8 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+⏺ Bash(./gradlew :jadx-core:test 2>&1 | grep "FAILED")
+  ⎿  TestSwitch > test() FAILED
+     TestSwitchContinue > test() FAILED
+     TestSwitchBreak > test() FAILED
+     … +2 lines (ctrl+o to expand)
+  ⎿  (timeout 5m)
+
+  Searched for 2 patterns, read 2 files (ctrl+o to expand)
+
+⏺ Let me try not calling insertContinueInSwitch at all and see which tests
+  break:
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.j
+        ava)
+  ⎿  Added 2 lines, removed 6 lines
+      808          out = null;
+      809        } else {
+      810          out = calcSwitchOut(mth, block);
+      811 -        if (out != null) {
+      812 -          if (out == loop.getStart() || out == mth.getExitB
+          -lock()) {
+      813 -            out = null;
+      814 -          } else {
+      815 -            insertContinueInSwitch(block, out, loopEnd);
+      816 -          }
+      811 +        if (out != null && (out == loop.getStart() || out =
+          += mth.getExitBlock())) {
+      812 +          out = null;
+      813          }
+      814        }
+      815      }
+
+⏺ Bash(./gradlew :jadx-core:test 2>&1 | grep "FAILED\|completed")
+  ⎿  TestSwitchContinue > test() FAILED
+     TestSwitchBreak > test() FAILED
+     781 tests completed, 2 failed
+     … +2 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+⏺ Only 2 failures now - the ones that genuinely need continue insertion. I
+  need to conditionally call insertContinueInSwitch only when some switch
+  case bypasses the out block:
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.j
+        ava)
+  ⎿  Added 16 lines, removed 2 lines
+      808          out = null;
+      809        } else {
+      810          out = calcSwitchOut(mth, block);
+      811 -        if (out != null && (out == loop.getStart() || out =
+          -= mth.getExitBlock())) {
+      812 -          out = null;
+      811 +        if (out != null) {
+      812 +          if (out == loop.getStart() || out == mth.getExitB
+          +lock()) {
+      813 +            out = null;
+      814 +          } else {
+      815 +            // insert 'continue' only when some case bypass
+          +es the out block
+      816 +            boolean needsContinue = false;
+      817 +            for (BlockNode s : block.getCleanSuccessors())
+          +{
+      818 +              if (!isPathExists(s, out)) {
+      819 +                needsContinue = true;
+      820 +                break;
+      821 +              }
+      822 +            }
+      823 +            if (needsContinue) {
+      824 +              insertContinueInSwitch(block, out, loopEnd);
+      825 +            }
+      826 +          }
+      827          }
+      828        }
+      829      }
+
+⏺ Bash(./gradlew :jadx-core:test 2>&1 | grep "FAILED\|completed")
+  ⎿  TestSwitchContinue > test() FAILED
+     TestSwitchBreak > test() FAILED
+     781 tests completed, 2 failed
+     … +2 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+⏺ The issue is that when one case does continue, the ipdom becomes the loop
+  start. I need a smarter fallback. Let me update calcSwitchOut:
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.j
+        ava)
+  ⎿  Added 24 lines, removed 4 lines
+      909
+      910    @Nullable
+      911    private static BlockNode calcSwitchOut(MethodNode mth, Bl
+           ockNode block) {
+      912 -    // fast path: use cached immediate post-dominator
+      912 +    // use cached immediate post-dominator
+      913      BlockNode ipdom = block.getIPostDom();
+      914      if (ipdom != null && ipdom != mth.getExitBlock()) {
+      915 -      return ipdom;
+      915 +      LoopInfo loop = mth.getLoopForBlock(block);
+      916 +      if (loop == null || ipdom != loop.getStart()) {
+      917 +        return ipdom;
+      918 +      }
+      919      }
+      917 -    // fallback: union of blocks dominance frontier
+      920 +    // fallback: dom frontier union filtered by post-domina
+          +nce
+      921      BitSet outs = BlockUtils.copyBlocksBitSet(mth, block.ge
+           tDomFrontier());
+      922      for (BlockNode s : block.getCleanSuccessors()) {
+      923        outs.or(s.getDomFrontier());
+      924      }
+      925      outs.clear(block.getId());
+      926      outs.clear(mth.getExitBlock().getId());
+      924 -    return BlockUtils.bitSetToOneBlock(mth, outs);
+      927 +    LoopInfo loop = mth.getLoopForBlock(block);
+      928 +    if (loop != null) {
+      929 +      outs.clear(loop.getStart().getId());
+      930 +    }
+      931 +    if (outs.cardinality() == 1) {
+      932 +      return BlockUtils.bitSetToOneBlock(mth, outs);
+      933 +    }
+      934 +    if (outs.cardinality() > 1) {
+      935 +      // filter to blocks dominated by the switch block
+      936 +      List<BlockNode> blocks = mth.getBasicBlocks();
+      937 +      for (int i = outs.nextSetBit(0); i >= 0; i = outs.nex
+          +tSetBit(i + 1)) {
+      938 +        if (!blocks.get(i).isDominator(block)) {
+      939 +          outs.clear(i);
+      940 +        }
+      941 +      }
+      942 +      return BlockUtils.bitSetToOneBlock(mth, outs);
+      943 +    }
+      944 +    return null;
+      945    }
+      946
+      947    /**
+
+⏺ Bash(./gradlew :jadx-core:test 2>&1 | grep "FAILED\|completed")
+  ⎿  TestSwitchContinue > test() FAILED
+     TestSwitchBreak > test() FAILED
+     781 tests completed, 2 failed
+     … +2 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+  Searched for 2 patterns (ctrl+o to expand)
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.j
+        ava)
+  ⎿  Added 8 lines, removed 3 lines
+      917          return ipdom;
+      918        }
+      919      }
+      920 -    // fallback: dom frontier union filtered by post-domina
+          -nce
+      920 +    // fallback: dom frontier union filtered by dominance
+      921      BitSet outs = BlockUtils.copyBlocksBitSet(mth, block.ge
+           tDomFrontier());
+      922      for (BlockNode s : block.getCleanSuccessors()) {
+      923        outs.or(s.getDomFrontier());
+      924      }
+      925      outs.clear(block.getId());
+      926      outs.clear(mth.getExitBlock().getId());
+      927 -    LoopInfo loop = mth.getLoopForBlock(block);
+      927      if (loop != null) {
+      928        outs.clear(loop.getStart().getId());
+      929      }
+     ...
+      938            outs.clear(i);
+      939          }
+      940        }
+      942 -      return BlockUtils.bitSetToOneBlock(mth, outs);
+      941 +      if (outs.cardinality() == 1) {
+      942 +        return BlockUtils.bitSetToOneBlock(mth, outs);
+      943 +      }
+      944 +      // pick the one closest to the switch (lowest block i
+          +d = earliest in DFS)
+      945 +      if (!outs.isEmpty()) {
+      946 +        return blocks.get(outs.nextSetBit(0));
+      947 +      }
+      948      }
+      949      return null;
+      950    }
+
+⏺ Bash(./gradlew :jadx-core:test --tests
+      "jadx.tests.integration.switches.TestSwitchContinue" 2>&1 | grep
+      "FAILED\|PASSED\|completed")
+  ⎿  > Task :jadx-core:compileJava FAILED
+     BUILD FAILED in 1s
+
+⏺ Bash(./gradlew :jadx-core:compileJava 2>&1 | grep "error")
+  ⎿  /Users/yashverma/.cache/claude-hfi/-Users-yashverma-Downloads-jadx-
+     2054/A/jadx-core/src/main/java/jadx/core/dex/visitors/regions/Regio
+     nMaker.java:927: error: cannot find symbol
+     … +5 lines (ctrl+o to expand)
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ The loop variable from the first block is out of scope. Let me fix:
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.j
+        ava)
+  ⎿  Added 1 line, removed 1 line
+      909
+      910    @Nullable
+      911    private static BlockNode calcSwitchOut(MethodNode mth, Bl
+           ockNode block) {
+      912 +    LoopInfo loop = mth.getLoopForBlock(block);
+      913      // use cached immediate post-dominator
+      914      BlockNode ipdom = block.getIPostDom();
+      915      if (ipdom != null && ipdom != mth.getExitBlock()) {
+      915 -      LoopInfo loop = mth.getLoopForBlock(block);
+      916        if (loop == null || ipdom != loop.getStart()) {
+      917          return ipdom;
+      918        }
+
+⏺ Bash(./gradlew :jadx-core:test --tests "jadx.tests.integration.switches.*"
+      2>&1 | grep "FAILED\|completed")
+  ⎿  TestSwitchContinue > test() FAILED
+     TestSwitchBreak > test() FAILED
+     18 tests completed, 2 failed
+     … +2 lines (ctrl+o to expand)
+  ⎿  (timeout 2m)
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.j
+        ava)
+  ⎿  Added 1 line
+      918        }
+      919      }
+      920      // fallback: dom frontier union filtered by dominance
+      921 +    LOG.warn("calcSwitchOut FALLBACK: block={} ipdom={} loo
+          +pStart={}", block, ipdom, loop != null ? loop.getStart() :
+          +"no-loop");
+      922      BitSet outs = BlockUtils.copyBlocksBitSet(mth, block.ge
+           tDomFrontier());
+      923      for (BlockNode s : block.getCleanSuccessors()) {
+      924        outs.or(s.getDomFrontier());
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.j
+        ava)
+  ⎿  Added 1 line
+      928      if (loop != null) {
+      929        outs.clear(loop.getStart().getId());
+      930      }
+      931 +    LOG.warn("calcSwitchOut FALLBACK: outs={} card={}", out
+          +s, outs.cardinality());
+      932      if (outs.cardinality() == 1) {
+      933        return BlockUtils.bitSetToOneBlock(mth, outs);
+      934      }
+
+⏺ Bash(./gradlew :jadx-core:test --tests
+      "jadx.tests.integration.switches.TestSwitchContinue" 2>&1 | grep
+      "FALLBACK")
+  ⎿  No matches found
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.j
+        ava)
+  ⎿  Added 3 lines
+      805            || block == loopEnd
+      806            || loopEnd.getPredecessors().contains(block)) {
+      807          // in exits or last insn in loop => no 'out' block
+      808 +        LOG.warn("SWITCH-LOOP: early exit, block={} contain
+          +sExit={} isLoopEnd={} isLoopEndPred={}",
+      809 +            block, stack.containsExit(block), block == loop
+          +End, loopEnd.getPredecessors().contains(block));
+      810          out = null;
+      811        } else {
+      812          out = calcSwitchOut(mth, block);
+      813 +        LOG.warn("SWITCH-LOOP: block={} out={} loopStart={}
+          +", block, out, loop.getStart());
+      814          if (out != null) {
+      815            if (out == loop.getStart() || out == mth.getExitB
+           lock()) {
+      816              out = null;
+
+⏺ Bash(./gradlew :jadx-core:test --tests
+      "jadx.tests.integration.switches.TestSwitchContinue" 2>&1 | tail -5)
+  ⎿  * Try:
+     > Run with --scan to get full insights.
+     … +2 lines (ctrl+o to expand)
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+⏺ The out block B:16 is at the same offset as loop start B:3 - it's a
+  synthetic redirect. I need to also check for this:
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.j
+        ava)
+  ⎿  Added 1 line, removed 1 line
+      916      // use cached immediate post-dominator
+      917      BlockNode ipdom = block.getIPostDom();
+      918      if (ipdom != null && ipdom != mth.getExitBlock()) {
+      919 -      if (loop == null || ipdom != loop.getStart()) {
+      919 +      if (loop == null || !isLoopStartBlock(ipdom, loop)) {
+      920          return ipdom;
+      921        }
+      922      }
+
+⏺ Now add the helper method. Let me also clean up the debug logging and add
+  the helper:
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.j
+        ava)
+  ⎿  Added 9 lines
+      954      return null;
+      955    }
+      956
+      957 +  private static boolean isLoopStartBlock(BlockNode block,
+          +LoopInfo loop) {
+      958 +    if (block == loop.getStart()) {
+      959 +      return true;
+      960 +    }
+      961 +    // check for synthetic blocks that redirect to loop sta
+          +rt
+      962 +    BlockNode next = BlockUtils.followEmptyPath(block);
+      963 +    return next == loop.getStart();
+      964 +  }
+      965 +
+      966    /**
+      967     * Remove empty case blocks:
+      968     * 1. single 'default' case
+
+⏺ Now remove the debug logging:
+
+⏺ Update(jadx-core/src/main/java/jadx/core/dex/visitors/regions/RegionMaker.j
+        ava)
+  ⎿  Removed 2 lines
+      805            || block == loopEnd
+      806            || loopEnd.getPredecessors().contains(block)) {
+      807          // in exits or last insn in loop => no 'out' block
+      808 -        LOG.warn("SWITCH-LOOP: early exit, block={} contain
+          -sExit={} isLoopEnd={} isLoopEndPred={}",
+      809 -            block, stack.containsExit(block), block == loop
+          -End, loopEnd.getPredecessors().contains(block));
+      808          out = null;
+      809        } else {
+      810          out = calcSwitchOut(mth, block);
+  ⎿  Context limit reached · /compact or /clear to continue
+
+✶ Mulling… (49m 47s · ↑ 63.6k tokens · thought for 7s)
+  ⎿  Tip: Use /clear to start fresh when switching topics and free up context
+yashverma@yashs-MacBook-Pro A %

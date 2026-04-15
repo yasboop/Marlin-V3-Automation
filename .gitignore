@@ -13,5 +13,9 @@ automation/data/*.md
 .DS_Store
 Thumbs.db
 
+# Temp / personal
+New Folder With Items*/
+zip_hfi.py
+
 # Generated (can regenerate from .md)
 Marlin_V3_Master_Guide.pdf

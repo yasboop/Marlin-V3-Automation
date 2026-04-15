@@ -1,0 +1,11 @@
+{
+  "completed_steps": [
+    "INITIALIZED",
+    "SETUP_DONE",
+    "CLAUDE_MD_DONE",
+    "LAUNCHED"
+  ],
+  "current_state": "LAUNCHED",
+  "updated_at": "2026-04-12T18:34:17.382842",
+  "launcher_session": "hfi-restart"
+}

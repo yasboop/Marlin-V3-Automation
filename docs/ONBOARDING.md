@@ -87,7 +87,12 @@ If they previously used `--vscode` mode:
 8. Watch Turn 1 run. Show them how to check trajectories:
    ```bash
    tmux ls
-   tmux attach -t <session-id>-A
+   # First launch (windows layout):
+   tmux select-window -t <session-id>:1   # Trajectory A
+   tmux select-window -t <session-id>:2   # Trajectory B
+   # After --continue relaunch (sessions layout):
+   tmux attach -t <session-id>-A          # Trajectory A
+   tmux attach -t <session-id>-B          # Trajectory B
    ```
 9. Watch feedback form auto-fill and submit
 10. Continue through Turns 2-3
@@ -119,9 +124,11 @@ If they previously used `--vscode` mode:
 | Aspect | tmux mode (this automation) | VS Code mode |
 |--------|----------------------------|--------------|
 | Launch command | `claude-hfi --tmux` | `claude-hfi --vscode` |
-| Control pane | tmux session | Regular terminal |
-| Trajectory views | tmux sessions | VS Code windows |
+| Control pane | tmux window :0 (first launch) or launcher session (after `--continue`) | Regular terminal |
+| Trajectory views | tmux windows :1/:2 (first launch) or `{id}-A`/`{id}-B` sessions (after `--continue`) | VS Code windows |
 | Automated form filling | Yes | No |
 | Automated prompt injection | Yes | No |
 | Code review | `git diff` or open files in any editor | VS Code diff viewer |
 | Switch effort | N/A | Change one flag |
+
+> **Note:** HFI creates different tmux layouts depending on launch mode. The orchestrator auto-detects which layout is active, so you don't need to worry about this — just use the orchestrator commands.

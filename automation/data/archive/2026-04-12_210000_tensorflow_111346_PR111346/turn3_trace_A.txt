@@ -1,0 +1,524 @@
+      4152 +
+      4153 +  // Because true_computation uses tanh (disallowed in altern
+           +ate memory), the
+      4154 +  // mirrored allocation optimization should NOT apply. The s
+           +ubsequent use (add)
+      4155 +  // should get copy from default memory (evicted and re-pref
+           +etched).
+      4156 +  auto add =
+      4157 +      module->GetComputationWithName("entry")->GetInstruction
+           +WithName("add");
+      4158 +  auto add_operand = add->operand(0);
+      4159 +  EXPECT_EQ(add_operand->shape().layout().memory_space(), kDe
+           +faultMemorySpace);
+      4160 +  EXPECT_EQ(add_operand->opcode(), HloOpcode::kCopyDone);
+      4161 +}
+      4162 +
+      4163  TEST_F(MemorySpaceAssignmentTest, ConditionalMultiUseInWhile)
+             {
+      4164    absl::string_view hlo_string = R"hlo(
+      4165    HloModule CondAllocation, is_scheduled=true
+
+⏺ Let me verify all three changes look correct.
+
+⏺ Bash(git diff --stat)
+  ⎿   .../service/memory_space_assignment/algorithm.cc   | 123 ++++++++++++
+     ++-
+      .../service/memory_space_assignment/algorithm.h    |  14 ++
+     … +8 lines (ctrl+o to expand)
+
+⏺ Bash(git diff third_party/xla/xla/service/memory_space_assignment/options.cc)
+  ⎿  diff --git a/third_party/xla/xla/service/memory_space_assignment/optio
+     ns.cc b/third_party/xla/xla/service/memory_space_assignment/options.cc
+     index 809c978a..baa32258 100644
+     … +13 lines (ctrl+o to expand)
+
+⏺ Bash(git diff third_party/xla/xla/service/memory_space_assignment/algorithm.cc
+       | head -80)
+  ⎿  diff --git a/third_party/xla/xla/service/memory_space_assignment/algor
+     ithm.cc b/third_party/xla/xla/service/memory_space_assignment/algorith
+     m.cc
+     … +55 lines (ctrl+o to expand)
+
+⏺ Bash(git diff third_party/xla/xla/service/memory_space_assignment/algorithm.cc
+       | tail -80)
+  ⎿  +              HloOpcode::kGetTupleElement &&
+     +          parameter_use.instruction->opcode() != HloOpcode::kTuple &&
+     +          parameter_use.instruction->opcode() != HloOpcode::kBitcast)
+     … +47 lines (ctrl+o to expand)
+
+⏺ Let me verify the new test as well:
+
+⏺ Bash(git diff third_party/xla/xla/service/memory_space_assignment/memory_space
+      _assignment_test.cc)
+  ⎿  diff --git a/third_party/xla/xla/service/memory_space_assignment/memor
+     y_space_assignment_test.cc b/third_party/xla/xla/service/memory_space_
+     assignment/memory_space_assignment_test.cc
+     … +106 lines (ctrl+o to expand)
+
+⏺ All three fixes are in place. Let me verify the final options.cc is
+  consistent:
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ And the updated inner loop in MaybeCreateMirroredAllocationForConditionalUse:
+
+  Read 1 file (ctrl+o to expand)
+ ▐▛███▜▌   Claude Code v2.1.98
+▝▜█████▛▘  Opus 4.6 with high effort · API Usage Billing
+  ▘▘ ▝▝    ~/…/claude-hfi/-Users-yashverma-marlin-tasks-tensorflow-111346/A
+
+  Debug mode enabled
+  Logging to: /tmp/claude-hfi/94185c4f-5c87-415d-a343-d3099b4fd102/debug.txt
+
+❯ /clear
+  ⎿  (no content)
+
+❯ Looking at MaybeCreateMirroredAllocationForConditionalUse in algorithm.cc
+  ,the function is not checking for async conversion candidates inside the
+  branch computations right now. If a branch has an instruction that is
+  basically an async conversion candidate the mirrored allocation would just
+  end up as an alt to alt copy which is not supported. For those cases the
+  whole thing needs to fall back to the default eviction path instead of
+  creating the mirrored allocation.
+
+  For VerifyAllocations in memory_space_assignment.cc ,the check is using
+  dynamic_cast to figure out if something is a MirroredAllocation. That
+  approach is not great when the codebase already has a proper allocation
+  hierarchy with virtual methods sitting there. A virtual method on Allocation
+  would be cleaner and actually consistent with how the rest of the hierarchy
+  works
+
+
+❯ Looking at MaybeCreateMirroredAllocationForConditionalUse in algorithm.cc
+  ,the function is not checking for async conversion candidates inside the
+  branch computations right now. If a branch has an instruction that is
+  basically an async conversion candidate the mirrored allocation would just
+  end up as an alt to alt copy which is not supported. For those cases the
+  whole thing needs to fall back to the default eviction path instead of
+  creating the mirrored allocation.
+
+  For VerifyAllocations in memory_space_assignment.cc ,the check is using
+  dynamic_cast to figure out if something is a MirroredAllocation. That
+  approach is not great when the codebase already has a proper allocation
+  hierarchy with virtual methods sitting there. A virtual method on Allocation
+  would be cleaner and actually consistent with how the rest of the hierarchy
+  works
+
+
+  Searched for 7 patterns, read 3 files (ctrl+o to expand)
+
+⏺ Now let me search for how async conversion candidates are identified in the
+  codebase.
+
+  Searched for 5 patterns, read 1 file (ctrl+o to expand)
+
+⏺ Now let me read the part of the function where it iterates through branches,
+  to understand where to add the async conversion candidate check.
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Now let me look at the existing is_* virtual methods pattern more closely and
+  also look at the options to understand how async conversion checks work.
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Now I have a good understanding of the code. Let me also check the test file
+  for existing mirrored allocation tests and verify what existing is_* methods
+  look like for other subclasses.
+
+  Searched for 2 patterns, read 1 file (ctrl+o to expand)
+
+⏺ Now I have good context. Let me also check how IsAsyncConversionCandidate is
+  used - it checks instructions in the entry/main computation. But inside
+  branches we need to check if any instruction is an async conversion candidate.
+   Let me look more closely at how the function works.
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Now let me also check IsAsyncConversionCopyCandidate and
+  IsAsyncConversionSliceCandidate to understand what types of instructions they
+  look for.
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+⏺ Now I have full context. Let me implement both changes.
+
+  Change 1: In MaybeCreateMirroredAllocationForConditionalUse, add a check for
+  async conversion candidates inside branch computations. The check should go
+  inside the loop over parameter_value->GetUses() where we already filter for
+  instructions in the branch computation.
+
+⏺ Update(third_party/xla/xla/service/memory_space_assignment/algorithm.cc)
+  ⎿  Added 10 lines
+      4716                    << " not allowed in alternate memory.";
+      4717            return false;
+      4718          }
+      4719 +        // Check if this use is an async conversion candidate
+           +. A mirrored
+      4720 +        // allocation in alternate memory would result in an
+           +unsupported
+      4721 +        // alt-to-alt copy for these instructions. Fall back
+           +to eviction.
+      4722 +        if (IsAsyncConversionCandidate(parameter_use.instruct
+           +ion)) {
+      4723 +          VLOG(4) << "Conditional mirrored allocation not pos
+           +sible for "
+      4724 +                  << called_computation->name()
+      4725 +                  << ": use " << parameter_use.ToString()
+      4726 +                  << " is an async conversion candidate.";
+      4727 +          return false;
+      4728 +        }
+      4729        }
+      4730      }
+      4731      // Check if we can keep the buffer in alternate memory fo
+            r this branch.
+
+⏺ Change 2: Add is_mirrored_allocation() virtual method to the Allocation class
+  hierarchy.
+
+⏺ First, add the virtual method to the base Allocation class:
+
+⏺ Update(third_party/xla/xla/service/memory_space_assignment/allocation.h)
+  ⎿  Added 1 line
+      148    virtual bool is_window_prefetched_allocation() const = 0;
+      149    virtual bool is_scoped_allocation() const = 0;
+      150    virtual bool is_reserved_allocation() const = 0;
+      151 +  virtual bool is_mirrored_allocation() const = 0;
+      152    // True if the allocation is for a copy or a sliced-copy.
+      153    bool is_copy_like_allocation() const;
+      154
+
+⏺ Now override it in MirroredAllocation to return true:
+
+⏺ Update(third_party/xla/xla/service/memory_space_assignment/allocation.h)
+  ⎿  Added 1 line
+      576    bool is_window_prefetched_allocation() const override { retu
+           rn false; }
+      577    bool is_scoped_allocation() const override { return false; }
+      578    bool is_reserved_allocation() const override { return false;
+            }
+      579 +  bool is_mirrored_allocation() const override { return true;
+          +}
+      580    absl::Status Process(const BitcastSplitFn& bitcast_split_fn)
+            override;
+      581    absl::Status PostProcess() override { return absl::OkStatus(
+           ); }
+      582    void MarkIfNeeded(absl::flat_hash_set<const Allocation*>& ne
+           eded_allocations)
+
+⏺ Now I need to add is_mirrored_allocation() const override { return false; } to
+   all other concrete subclasses. Let me find them all.
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+⏺ I need to add is_mirrored_allocation returning false to all non-mirrored
+  subclasses. There are 7 such locations (lines 235, 270, 330, 438, 516, 615,
+  649). Let me do them all.
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Now I'll add is_mirrored_allocation returning false to all non-mirrored
+  subclasses. Each of these has a unique is_reserved_allocation line followed by
+   a unique next line, so I can use the pattern of adding after
+  is_reserved_allocation:
+
+⏺ Update(third_party/xla/xla/service/memory_space_assignment/allocation.h)
+  ⎿  Added 1 line
+      233    bool is_window_prefetched_allocation() const override { retu
+           rn false; }
+      234    bool is_scoped_allocation() const override { return false; }
+      235    bool is_reserved_allocation() const override { return false;
+            }
+      236 +  bool is_mirrored_allocation() const override { return false;
+          + }
+      237    absl::Status Process(const BitcastSplitFn& bitcast_split_fn)
+            override;
+      238    absl::Status PostProcess() override { return absl::OkStatus(
+           ); }
+      239    void MarkIfNeeded(absl::flat_hash_set<const Allocation*>& ne
+           eded_allocations)
+
+⏺ Update(third_party/xla/xla/service/memory_space_assignment/allocation.h)
+  ⎿  Added 1 line
+      269    bool is_window_prefetched_allocation() const override { retu
+           rn false; }
+      270    bool is_scoped_allocation() const override { return false; }
+      271    bool is_reserved_allocation() const override { return true;
+           }
+      272 +  bool is_mirrored_allocation() const override { return false;
+          + }
+      273    absl::Status Process(const BitcastSplitFn& bitcast_split_fn)
+            override;
+      274    absl::Status PostProcess() override { return absl::OkStatus(
+           ); }
+      275    void MarkIfNeeded(absl::flat_hash_set<const Allocation*>& ne
+           eded_allocations)
+
+⏺ Now CopyAllocation:
+
+⏺ Update(third_party/xla/xla/service/memory_space_assignment/allocation.h)
+  ⎿  Added 1 line
+      330    bool is_window_prefetched_allocation() const override { retu
+           rn false; }
+      331    bool is_scoped_allocation() const override { return false; }
+      332    bool is_reserved_allocation() const override { return false;
+            }
+      333 +  bool is_mirrored_allocation() const override { return false;
+          + }
+      334    absl::Status Process(const BitcastSplitFn& bitcast_split_fn)
+            override;
+      335    absl::Status PostProcess() override { return absl::OkStatus(
+           ); }
+      336    void MarkIfNeeded(absl::flat_hash_set<const Allocation*>& ne
+           eded_allocations)
+
+⏺ Now SlicedCopyAllocation:
+
+⏺ Update(third_party/xla/xla/service/memory_space_assignment/allocation.h)
+  ⎿  Added 1 line
+      439    bool is_window_prefetched_allocation() const override { retu
+           rn false; }
+      440    bool is_scoped_allocation() const override { return false; }
+      441    bool is_reserved_allocation() const override { return false;
+            }
+      442 +  bool is_mirrored_allocation() const override { return false;
+          + }
+      443    // MemorySpaceAssignment::Process() calls Process(const Bitc
+           astSplitFn&
+      444    // bitcast_split_fn) to create asynchronous slice copies, an
+           d a bitcast-concat
+      445    // call to glue the slices back together.
+
+⏺ Now WindowPrefetchedAllocation:
+
+⏺ Update(third_party/xla/xla/service/memory_space_assignment/allocation.h)
+  ⎿  Added 1 line
+      518    bool is_window_prefetched_allocation() const override { retu
+           rn true; }
+      519    bool is_scoped_allocation() const override { return false; }
+      520    bool is_reserved_allocation() const override { return false;
+            }
+      521 +  bool is_mirrored_allocation() const override { return false;
+          + }
+      522    // MemorySpaceAssignment::Process() calls Process(const Bitc
+           astSplitFn&
+      523    // bitcast_split_fn) to create asynchronous window prefetche
+           s.
+      524    absl::Status Process(const BitcastSplitFn& bitcast_split_fn)
+            override;
+
+⏺ Now ParentAllocation:
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Update(third_party/xla/xla/service/memory_space_assignment/allocation.h)
+  ⎿  Added 1 line
+      618    bool is_window_prefetched_allocation() const override { retu
+           rn false; }
+      619    bool is_scoped_allocation() const override { return false; }
+      620    bool is_reserved_allocation() const override { return false;
+            }
+      621 +  bool is_mirrored_allocation() const override { return false;
+          + }
+      622    absl::Status Process(const BitcastSplitFn& bitcast_split_fn)
+            override;
+      623    absl::Status PostProcess() override;
+      624    void MarkIfNeeded(absl::flat_hash_set<const Allocation*>& ne
+           eded_allocations)
+
+⏺ Now ScopedAllocation:
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Update(third_party/xla/xla/service/memory_space_assignment/allocation.h)
+  ⎿  Added 1 line
+      653    bool is_window_prefetched_allocation() const override { retu
+           rn false; }
+      654    bool is_scoped_allocation() const override { return true; }
+      655    bool is_reserved_allocation() const override { return false;
+            }
+      656 +  bool is_mirrored_allocation() const override { return false;
+          + }
+      657    absl::Status Process(const BitcastSplitFn& bitcast_split_fn)
+            override;
+      658    absl::Status PostProcess() override { return absl::OkStatus(
+           ); }
+      659    void MarkIfNeeded(absl::flat_hash_set<const Allocation*>& ne
+           eded_allocations)
+
+⏺ Now replace the dynamic_cast in VerifyAllocations with the new virtual method:
+
+⏺ Update(third_party/xla/xla/service/memory_space_assignment/memory_space_assign
+        ment.cc)
+  ⎿  Added 1 line, removed 1 line
+      363    // conditional branch parameters that share the parent's VME
+           M allocation).
+      364    for (const auto& allocation : allocations_) {
+      365      if (allocation->memory_space() == MemorySpace::kAlternate
+           &&
+      366 -        dynamic_cast<const MirroredAllocation*>(allocation.get
+          -()) == nullptr) {
+      366 +        !allocation->is_mirrored_allocation()) {
+      367        TF_RETURN_IF_ERROR(add_allocation_and_verify(allocation.
+           get()));
+      368      }
+      369    }
+
+⏺ Now let me also check if the other dynamic_cast<const MirroredAllocation*> in
+  allocation.cc should be updated:
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ That dynamic_cast in operator== is fine - it's a standard pattern for
+  implementing polymorphic equality where you need to downcast to compare
+  fields. That's different from the type-checking pattern.
+
+  Now let me check if there are any tests that specifically need to be added for
+   the async conversion candidate check. Let me also verify the test file for
+  any existing test patterns I should follow.
+
+⏺ Let me look at how the existing tests set up enable_sync_copy_replacement
+  (required for IsAsyncConversionCandidate to return true) and what test
+  patterns to follow.
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+⏺ Let me look at the test immediately after line 4161 (the
+  ConditionalFallsBackToEvictionWhenBranchUseRequiresDefaultMem test) to
+  understand the insertion point for a new test.
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Now I'll add a test for the async conversion candidate fallback. The key
+  scenario: a branch has a copy instruction (which is an async conversion
+  candidate when enable_sync_copy_replacement is true) that uses the parameter.
+  This should cause the mirrored allocation to fall back to eviction.
+
+⏺ Update(third_party/xla/xla/service/memory_space_assignment/memory_space_assign
+        ment_test.cc)
+  ⎿  Added 48 lines
+      4160    EXPECT_EQ(add_operand->opcode(), HloOpcode::kCopyDone);
+      4161  }
+      4162
+      4163 +TEST_F(MemorySpaceAssignmentTest,
+      4164 +       ConditionalFallsBackToEvictionWhenBranchHasAsyncConver
+           +sionCandidate) {
+      4165 +  // When a branch computation contains an instruction that i
+           +s an async
+      4166 +  // conversion candidate (e.g., a copy eligible for sync-to-
+           +async replacement),
+      4167 +  // a mirrored allocation in alternate memory would result i
+           +n an unsupported
+      4168 +  // alt-to-alt copy. The optimization should fall back to ev
+           +iction.
+      4169 +  absl::string_view hlo_string = R"hlo(
+      4170 +  HloModule CondAllocation, is_scheduled=true
+      4171 +
+      4172 +  true_computation {
+      4173 +    p0 = (f32[3]{0}) parameter(0)
+      4174 +    gte = f32[3]{0} get-tuple-element(p0), index=0
+      4175 +    copy = f32[3]{0} copy(gte)
+      4176 +    ROOT neg1 = f32[3]{0} negate(copy)
+      4177 +  }
+      4178 +
+      4179 +  false_computation {
+      4180 +    p0 = (f32[3]{0}) parameter(0)
+      4181 +    gte = f32[3]{0} get-tuple-element(p0), index=0
+      4182 +    ROOT neg2 = f32[3]{0} negate(gte)
+      4183 +  }
+      4184 +
+      4185 +  ENTRY entry {
+      4186 +    p0 = f32[3]{0} parameter(0)
+      4187 +    p1 = pred[] parameter(1)
+      4188 +    copy = f32[3]{0} copy(p0)
+      4189 +    tuple = (f32[3]{0}) tuple(copy)
+      4190 +    conditional = f32[3]{0} conditional(p1, tuple, tuple), tr
+           +ue_computation=true_computation, false_computation=false_comp
+           +utation
+      4191 +    ROOT add = f32[3]{0} add(copy, conditional)
+      4192 +  }
+      4193 +  )hlo";
+      4194 +  TF_ASSERT_OK_AND_ASSIGN(auto module,
+      4195 +                          ParseAndReturnVerifiedModule(hlo_st
+           +ring));
+      4196 +  Options options = DefaultMemorySpaceOptions();
+      4197 +  options.enable_conditional_redundant_eviction_elimination =
+           + true;
+      4198 +  options.enable_sync_copy_replacement = true;
+      4199 +  AssignMemorySpace(module.get(), options);
+      4200 +
+      4201 +  // Because true_computation has a copy (async conversion ca
+           +ndidate), the
+      4202 +  // mirrored allocation optimization should NOT apply. The s
+           +ubsequent use (add)
+      4203 +  // should get copy from default memory (evicted and re-pref
+           +etched).
+      4204 +  auto add =
+      4205 +      module->GetComputationWithName("entry")->GetInstruction
+           +WithName("add");
+      4206 +  auto add_operand = add->operand(0);
+      4207 +  EXPECT_EQ(add_operand->shape().layout().memory_space(), kDe
+           +faultMemorySpace);
+      4208 +  EXPECT_EQ(add_operand->opcode(), HloOpcode::kCopyDone);
+      4209 +}
+      4210 +
+      4211  TEST_F(MemorySpaceAssignmentTest, ConditionalMultiUseInWhile)
+             {
+      4212    absl::string_view hlo_string = R"hlo(
+      4213    HloModule CondAllocation, is_scheduled=true
+
+⏺ Now let me verify my changes are consistent by checking the final state of all
+   modified sections.
+
+  Searched for 3 patterns (ctrl+o to expand)
+
+⏺ Everything looks correct. Let me count: 1 pure virtual in base (= 0), 7
+  overrides returning false, 1 override returning true (MirroredAllocation) = 9
+  total. That matches the 8 concrete subclasses + 1 base.
+
+  Let me also verify there are no other dynamic_cast.*MirroredAllocation usages
+  that should be updated (besides the one in operator== which is appropriate):
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+⏺ Good - only the operator== one remains, which is appropriate.
+
+⏺ Here's a summary of all changes made:
+
+  1. algorithm.cc - Async conversion candidate check in
+  MaybeCreateMirroredAllocationForConditionalUse
+
+  Added a check at line ~4722 inside the loop over parameter uses within branch
+  computations. If any use instruction inside a branch is an
+  IsAsyncConversionCandidate, the function returns false (falling back to
+  eviction). This prevents creating a mirrored allocation in alternate memory
+  that would result in an unsupported alt-to-alt copy.
+
+  2. allocation.h - New is_mirrored_allocation() virtual method
+
+  Added virtual bool is_mirrored_allocation() const = 0 to the base Allocation
+  class alongside the existing is_* type-query methods. Overridden in all 8
+  concrete subclasses:
+  - MirroredAllocation returns true
+  - All others (PinnedAllocation, ReservedAllocation, CopyAllocation,
+  SlicedCopyAllocation, WindowPrefetchedAllocation, ParentAllocation,
+  ScopedAllocation) return false
+
+  3. memory_space_assignment.cc - Replace dynamic_cast with virtual method
+
+  Changed VerifyAllocations at line 366 from dynamic_cast<const
+  MirroredAllocation*>(allocation.get()) == nullptr to
+  !allocation->is_mirrored_allocation().
+
+  4. memory_space_assignment_test.cc - New test
+
+  Added ConditionalFallsBackToEvictionWhenBranchHasAsyncConversionCandidate test
+   that verifies when a branch has a copy instruction (async conversion
+  candidate with enable_sync_copy_replacement = true), the mirrored allocation
+  optimization is skipped and the buffer is evicted to default memory instead.
+
+✻ Hashing… (4m 30s · ↓ 9.2k tokens)
+  ⎿  Tip: Use /btw to ask a quick side question without interrupting Claude's
+     current work
+yashverma@yashs-MacBook-Pro A %
